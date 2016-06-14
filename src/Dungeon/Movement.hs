@@ -9,8 +9,8 @@ module Dungeon.Movement (
 , screenH
 , startX
 , startY
-, deltaScreen
 , screenBounds
+, Turn(..)
 ) where
 
 import Control.Auto as A
@@ -23,6 +23,8 @@ import Control.Monad.Fix
 import Control.Applicative
 import Prelude hiding ((.))
 
+data Turn = North | South | West | East
+
 
 dungeonW = 100 :: Int
 dungeonH = 50 :: Int
@@ -33,49 +35,47 @@ screenH = 20
 padX = 5
 padY = 5
 
-startX = 10
+startX = 2
 startY = 10
 
-deltaPlayer :: (Monad m) => Auto m Char  (Int, Int)
-deltaPlayer = arr $ \x -> case x of
-   'h' -> (-1,0)
-   'j' -> (0,1)
-   'k' -> (0,-1)
-   'l' -> (1,0)
-   _   -> (0,0)
-
-sumPair (a,b) (c,d) = (a+c,b+d)
-
-playerPos' startx starty = (A.accum sumPair (startx,starty)) .  deltaPlayer
-
-playerPos :: (Monad m) => Auto m Char (Int,Int)
-playerPos = playerPos' startX startY
-
-deltaScreen :: (Monad m) => Auto m (Char, Int, Int, Int, Int) (Int,Int)
-deltaScreen = proc (inp, x1, y1, x2, y2) ->  do
-  (playerx,playery) <- playerPos -< inp
-  let deltax = if ((playerx  - x1) <= padX) 
-               then playerx - x1 - padX 
-               else if ((x2 - playerx) <= padX)
-                    then padX + playerx - x2 
-                    else 0
-      deltay = if ((playery  - y1) <= padY)
-               then playery - y1 - padY
-               else if ((y2 - playery) <= padY)
-                    then padY + playery - y2
-                    else 0
-    in returnA -< (deltax,deltay)
-
-sumPQ (a,b,c,d) (x,y) = (a+x,b+y,c+x,d+y) 
-
-screenBounds :: (MonadFix m) => Auto m Char (Int,Int,Int,Int)
-screenBounds = proc inp -> do
+boundaryCheck :: (Monad m) => Auto m (Int,Int) Bool
+boundaryCheck = arr $ \(x,y) ->
+  let check
+        | (x >= 1) && (x <= dungeonW) && (y >= 1) && (y <= dungeonH) = True
+        | otherwise = False
+  in check
+     
+playerPos :: (MonadFix m) => Auto m Turn (Int,Int)
+playerPos = proc turn -> do 
   rec
-    (x1,y1,x2,y2) <- lastVal (1,1,screenW,screenH) -< ret
-    ret <- (A.accum sumPQ (1,1,screenW,screenH)) . deltaScreen -< (inp,x1,y1,x2,y2)
-  returnA -< ret
+    (px,py) <- delay (startX, startY) -< (px',py')
+    let (px'',py'') = case turn of
+                        West -> (px-1,py)
+                        East -> (px+1,py)
+                        North -> (px,py-1)
+                        South -> (px,py+1)
+    validTurn <- boundaryCheck -< (px'',py'')
+    let (px',py') = if validTurn then (px'',py'') else (px,py)
+  returnA -< (px',py')
 
-screenPos :: (MonadFix m) => Auto m Char (Int,Int)
-screenPos = proc inp -> do
-  ((px,py),(x1,y1,x2,y2)) <- (playerPos &&& screenBounds) -< inp
+
+screenBounds :: (MonadFix m) => Auto m Turn (Int,Int,Int,Int)
+screenBounds = proc turn -> do
+  rec
+    (x1,y1,x2,y2) <- delay (1,1,screenW,screenH) -< (x1', y1', x2', y2')
+    (px,py) <- playerPos -< turn
+    let dx
+          | ((px - x1) <= padX) = (max (px - padX) 1) - x1
+          | ((x2 - px) <= padX) = (min dungeonW (padX + px)) - x2
+          | otherwise = 0
+        dy
+          | ((py  - y1) <= padY) =  (max (py - padY) 1) - y1
+          | ((y2 - py) <= padY) =  (min dungeonH (padY + py)) - y2
+          | otherwise = 0
+        (x1', y1', x2', y2') = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
+  returnA -< (x1', y1', x2', y2')
+
+screenPos :: (MonadFix m) => Auto m Turn (Int,Int)
+screenPos = proc turn -> do
+  ((px,py),(x1,y1,x2,y2)) <- (playerPos &&& screenBounds) -< turn
   returnA -< (px - x1 + 1, py - y1 + 1)
