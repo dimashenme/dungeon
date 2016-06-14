@@ -1,2 +1,3 @@
 # dungeon
-my attempt to learn myself a haskell by making something like a roguelike
+
+My attempt to learn myself a Haskell by making something like a roguelike.
