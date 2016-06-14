@@ -42,8 +42,8 @@ logicAuto = toOn . (screenPos &&& screenBounds)
 
 -- | draw the dungeon and the player
 output :: Vty -> (Int,Int) -> (Int, Int, Int, Int) -> IO ()
-output vty (px,py) (x1, y1, x2, y2)=  do
-  update vty (picForImage (renderLevel testDungeon x1 y1 x2 y2))
+output vty (px,py) rect =  do
+  update vty (picForImage (renderLevel testDungeon rect))
   setCursorPos (outputIface vty) (px-1) (py-1)
   showCursor  (outputIface vty)
 

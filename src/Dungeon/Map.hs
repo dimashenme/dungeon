@@ -70,17 +70,23 @@ chunk n xs = y1 : chunk n y2
   where
     (y1, y2) = splitAt n xs
 
-subRect :: Int -> Int -> Int -> Int -> Int -> [a] -> [[a]]
-subRect x1 y1 x2 y2 w  l =
-  take (y2 - y1 + 1) . drop (y1-1) $ fmap (take (x2 - x1 + 1) . drop (x1-1)) ll
-  where ll = chunk w l 
+-- | return a list of rows of a rectangle in an array
+-- @x1 y1 x2 y2@ -- coordinates of the rectangle
+-- @w@ - row length
+-- @a@ - the array
+subRect :: (Int,Int,Int,Int) -> Int -> [a] -> [[a]]
+subRect (x1,y1,x2,y2)  w a =
+  take (y2 - y1 + 1) . drop (y1-1) $ fmap (take (x2 - x1 + 1) . drop (x1-1)) aa
+  where aa = chunk w a
 
--- | print out an array of chars on a given Vty
+-- | make a vty image of a rectangle in a dungeon on a given Vty
+-- @level@ - the dungeon level (array of chars)
+-- @rect$ - the coordinates of the rectangle to print
 renderLevel
   :: (Num t, Ix t) =>
-     Array (t, Int) Char -> Int -> Int -> Int -> Int -> Image
-renderLevel level x1 y1 x2 y2 =
-    vertCat (fmap (string defAttr) (subRect x1 y1 x2 y2 w (elems level)))
+     Array (t, Int) Char -> (Int,Int,Int,Int) -> Image
+renderLevel level rect =
+    vertCat (fmap (string defAttr) (subRect rect w (elems level)))
     where w = bx2 - bx1 + 1
           h = by2 - by1 + 1          
           ((by1,bx1),(by2,bx2)) = bounds level
