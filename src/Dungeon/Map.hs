@@ -14,10 +14,15 @@ module Dungeon.Map (
   , putRoom
   , newDungeon
   , DungeonLevel
+  , renderLevel
 ) where
        
 import Control.Monad.ST
 import Control.Monad
+
+import Graphics.Vty
+import Graphics.Vty.Picture
+import Data.Default (def)
 
 import Data.Array
 import Data.Array.ST
@@ -55,4 +60,28 @@ data DungeonLevel = Array (Int,Int) Char
 -- | Create a blank dungeon level.
 newDungeon :: Int -> Int -> Array (Int, Int) Char
 newDungeon w h = listArray ((1,1),(w,h)) (take (w*h) [' ',' '..])
+
+
+-- screen output
+
+chunk :: Int -> [a] -> [[a]]
+chunk _ [] = []
+chunk n xs = y1 : chunk n y2
+  where
+    (y1, y2) = splitAt n xs
+
+subRect :: Int -> Int -> Int -> Int -> Int -> [a] -> [[a]]
+subRect x1 y1 x2 y2 w  l =
+  take (y2 - y1 + 1) . drop (y1-1) $ fmap (take (x2 - x1 + 1) . drop (x1-1)) ll
+  where ll = chunk w l 
+
+-- | print out an array of chars on a given Vty
+renderLevel
+  :: (Num t, Ix t) =>
+     Array (t, Int) Char -> Int -> Int -> Int -> Int -> Image
+renderLevel level x1 y1 x2 y2 =
+    vertCat (fmap (string defAttr) (subRect x1 y1 x2 y2 w (elems level)))
+    where w = bx2 - bx1 + 1
+          h = by2 - by1 + 1          
+          ((by1,bx1),(by2,bx2)) = bounds level
 

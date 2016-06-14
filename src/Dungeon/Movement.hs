@@ -1,4 +1,15 @@
 {-# LANGUAGE Arrows #-}
+{-|
+Module      : Movement
+Description : Movement in the dugneon
+Copyright   : (c) Dmitry Sustretov, 2016
+License     : GPL-3
+Maintainer  : dmitri83@hcoop.net
+Stability   : experimental
+Portability : POSIX
+
+This module contains autos that handle player movement in the dungeon. 
+-}
 
 module Dungeon.Movement (
   screenPos
@@ -26,18 +37,20 @@ import Prelude hiding ((.))
 data Turn = North | South | West | East
 
 
-dungeonW = 100 :: Int
-dungeonH = 50 :: Int
-
 screenW = 40
 screenH = 20
 
 padX = 5
 padY = 5
 
+
+dungeonW = 100 :: Int
+dungeonH = 50 :: Int
+
 startX = 2
 startY = 10
 
+-- | check if given coordinates are within the dungeon
 boundaryCheck :: (Monad m) => Auto m (Int,Int) Bool
 boundaryCheck = arr $ \(x,y) ->
   let check
@@ -45,6 +58,8 @@ boundaryCheck = arr $ \(x,y) ->
         | otherwise = False
   in check
      
+-- | an auto that tracks player position after a given turn has
+-- been made
 playerPos :: (MonadFix m) => Auto m Turn (Int,Int)
 playerPos = proc turn -> do 
   rec
@@ -58,7 +73,8 @@ playerPos = proc turn -> do
     let (px',py') = if validTurn then (px'',py'') else (px,py)
   returnA -< (px',py')
 
-
+-- | an auto that tracks the coordinates of the piece of map
+-- that is currently drawn on the screen
 screenBounds :: (MonadFix m) => Auto m Turn (Int,Int,Int,Int)
 screenBounds = proc turn -> do
   rec
@@ -75,6 +91,8 @@ screenBounds = proc turn -> do
         (x1', y1', x2', y2') = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
   returnA -< (x1', y1', x2', y2')
 
+-- | An auto that tracks the coordinates of the player as she
+-- is drawn on the screen
 screenPos :: (MonadFix m) => Auto m Turn (Int,Int)
 screenPos = proc turn -> do
   ((px,py),(x1,y1,x2,y2)) <- (playerPos &&& screenBounds) -< turn
