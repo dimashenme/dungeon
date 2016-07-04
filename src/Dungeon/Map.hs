@@ -12,13 +12,14 @@ This module contains functions for creating maps of @dungeon levels@.
 module Dungeon.Map (
     putRoomST
   , putRoom
-  , newDungeon
-  , DungeonLevel
+  , Level
+  , newLevel
   , renderLevel
+  , printOut
 ) where
        
-import Control.Monad.ST
 import Control.Monad
+import Control.Monad.ST
 
 import Graphics.Vty
 import Graphics.Vty.Picture
@@ -27,16 +28,23 @@ import Data.Default (def)
 import Data.Array
 import Data.Array.ST
 
--- | Helper function will simply print out the dungeon
-printOut :: Array (Int, Int) Char -> IO ()
-printOut a =
-  printL (elems a)
-  where ((_,_),(h,w)) = bounds a
-        printL [] = return ()
-        printL l = let (line, rest) = splitAt w l
-                   in do putStrLn line
-                         printL rest
+-- | The map of a dungeon level 
+type Level = Array (Int,Int) Char
 
+
+-- | Create a blank dungeon level.
+newLevel :: Int -> Int -> Level
+newLevel w h = listArray ((1,1),(w,h)) (take (w*h) [' ',' '..])
+
+-- | Helper function will simply print out the dungeon
+printOut :: Level -> IO ()
+printOut a =
+  let ((_,_),(w,h)) = bounds a
+  in
+    forM_ [1..h] (\y ->
+      putStrLn $               
+      foldr (\x s ->  s ++ [a ! (x,y)]) "" [1..w] ++ "\n" )
+  
 -- | An ST action that draws a room on the dungeon map.
 putRoomST :: (Int, Int) -> (Int,Int) -> STArray s (Int, Int) Char -> ST s (STArray s (Int, Int) Char)
 putRoomST (a,b) (c,d) ar = do
@@ -48,18 +56,12 @@ putRoomST (a,b) (c,d) ar = do
   return ar
 
 -- | Return a new dungeon map with new room drawn on it.
-putRoom :: (Int, Int) -> (Int,Int) -> Array (Int, Int) Char -> Array (Int, Int) Char
+putRoom :: (Int, Int) -> (Int,Int) -> Level -> Level
 putRoom (a,b) (c,d) ar = runSTArray $ do
     ar' <- thaw ar
     putRoomST (a,b) (c,d) ar'
     return ar'
 
--- | A dungeon level map
-data DungeonLevel = Array (Int,Int) Char
-
--- | Create a blank dungeon level.
-newDungeon :: Int -> Int -> Array (Int, Int) Char
-newDungeon w h = listArray ((1,1),(w,h)) (take (w*h) [' ',' '..])
 
 
 -- screen output
@@ -84,7 +86,7 @@ subRect (x1,y1,x2,y2)  w a =
 -- @rect$ - the coordinates of the rectangle to print
 renderLevel
   :: (Num t, Ix t) =>
-     Array (t, Int) Char -> (Int,Int,Int,Int) -> Image
+     Level -> (Int,Int,Int,Int) -> Image
 renderLevel level rect =
     vertCat (fmap (string defAttr) (subRect rect w (elems level)))
     where w = bx2 - bx1 + 1
