@@ -1,13 +1,13 @@
 name:                dungeon
 version:             0.1.0.0
-synopsis:            Initial project template from stack
-description:         Please see README.md
-homepage:            http://github.com/githubuser/dungeon#readme
+synopsis:            a rudimentary rogulike game
+description:         My attempt to learn myself a Haskell by making something like a roguelike.
+homepage:            http://github.com/dimashenme/dungeon#readme
 license:             BSD3
 license-file:        LICENSE
-author:              Author name here
+author:              Dima Sustretov
 maintainer:          dmitri83@hcoop.net
-copyright:           2016 Dmitry Sustretov
+copyright:           2016 Dima Sustretov
 category:            Games
 build-type:          Simple
 -- extra-source-files:
@@ -46,4 +46,4 @@ test-suite dungeon-test
 
 source-repository head
   type:     git
-  location: https://github.com/githubuser/dungeon
+  location: https://github.com/dimashenme/dungeon
