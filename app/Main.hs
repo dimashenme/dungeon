@@ -1,14 +1,10 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE Arrows #-}
 
 import Control.Auto as A
 import Control.Auto.Core
 import Control.Auto.Interval
-import Control.Auto.Generate
 import Control.Arrow
 import Control.Monad
-import Control.Monad.Fix
-import Control.Applicative
 import Prelude hiding ((.))
 
 import Data.Array 
@@ -33,37 +29,31 @@ testDungeon = runSTArray $ do
   putRoomST (30,24) (40,40) a
   return a
 
--- game logic
+-- view settings
 
+testSettings = ViewSettings {
+      DM.padX = 5
+    , DM.padY = 5
+    , DM.screenW = 40
+    , DM.screenH = 20
+    , DM.startX = 2
+    , DM.startY = 10
+  }
 
-screenW = 40
-screenH = 20
+initialState = ((startX testSettings,startY testSettings),(1,1,screenW testSettings,screenH testSettings))
 
-padX = 5
-padY = 5
+-- autos
 
-
-startX = 2
-startY = 10
-
-initialState = ((Main.startX,Main.startY),(1,1,Main.screenW,Main.screenH))
+-- | Game state variables
 
 logic :: Auto IO Turn ((Int, Int), (Int, Int, Int, Int))
-logic =  let
-  settings = ViewSettings {
-      DM.padX = Main.padX
-    , DM.padY = Main.padY
-    , DM.screenW = Main.screenW
-    , DM.screenH = Main.screenH
-    , DM.startX = Main.startX
-    , DM.startY = Main.startY
-  }
-  in (screenPos testDungeon settings &&& screenBounds testDungeon settings)
+logic =
+  (screenPos testDungeon testSettings &&& screenBounds testDungeon testSettings)
 
-
+-- | Render the level and the player
 output :: Vty -> Auto IO  ((Int, Int), (Int, Int, Int, Int)) ()
 output vty = arrM $ \((px,py),rect) ->  do
-  update vty (picForImage (renderLevel testDungeon rect))
+  update vty (picForImage (translate 10 5 (renderLevel testDungeon rect)))
   setCursorPos (outputIface vty) (px-1) (py-1)
   showCursor  (outputIface vty)
 
@@ -93,7 +83,7 @@ mainAuto vty =
           Nothing -> do returnA -< Nothing
   in doFirst --> running
 
--- | The main loop just invoke the main auto
+-- | The main loop just invokes the main auto
 -- above until it return Nothing
 mainLoop :: Monad m => Auto m () (Maybe t) -> m ()
 mainLoop a  = do
@@ -102,15 +92,7 @@ mainLoop a  = do
     Just action -> mainLoop a'
     Nothing -> return ()
 
-testSettings = ViewSettings {
-      DM.padX = Main.padX
-    , DM.padY = Main.padY
-    , DM.screenW = Main.screenW
-    , DM.screenH = Main.screenH
-    , DM.startX = Main.startX
-    , DM.startY = Main.startY
-  }
-
+main :: IO ()
 main = do
   vty <- mkVty def
   showCursor (outputIface vty)
