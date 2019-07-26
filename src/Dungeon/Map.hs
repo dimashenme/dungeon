@@ -85,8 +85,7 @@ subRect (x1,y1,x2,y2)  w a =
 -- @level@ - the dungeon level (array of chars)
 -- @rect$ - the coordinates of the rectangle to print
 renderLevel
-  :: (Num t, Ix t) =>
-     Level -> (Int,Int,Int,Int) -> Image
+  :: Level -> (Int,Int,Int,Int) -> Image
 renderLevel level rect =
     vertCat (fmap (string defAttr) (subRect rect w (elems level)))
     where w = bx2 - bx1 + 1

@@ -12,8 +12,7 @@ This module contains autos that handle player movement in the dungeon.
 -}
 
 module Dungeon.Movement (
-  screenPos
-, playerPos
+  playerPos
 , screenBounds
 , Turn(..)
 , ViewSettings(..)
@@ -47,12 +46,12 @@ data ViewSettings = ViewSettings {
 
 
 -- | check if given coordinates are within the dungeon
-boundaryCheck :: (Monad m) => Level -> Auto m (Int,Int) Bool
-boundaryCheck level  = arr $ \(x,y) ->
-  let check
+boundaryCheck ::  Int -> Int -> Level  -> Bool
+boundaryCheck x y level = 
+  let ((_, _), (w, h)) = bounds level
+      check
         | (x >= 1) && (x <= w) && (y >= 1) && (y <= h) = True
         | otherwise = False
-      ((_,_),(w,h)) = bounds level
   in check
      
 -- | an auto that tracks player position after a given turn has
@@ -65,33 +64,33 @@ playerPos level s = proc turn -> do
                         West -> (px-1,py)
                         East -> (px+1,py)
                         North -> (px,py-1)
-                        South -> (px,py+1)
-    validTurn <- boundaryCheck level -< (px'',py'')
-    let (px',py') = if validTurn then (px'',py'') else (px,py)
+                        South -> (px,py+1)    
+    let validTurn = boundaryCheck px'' py'' level
+        (px',py') = if validTurn then (px'',py'') else (px,py)
   returnA -< (px',py')
 
 -- | an auto that tracks the coordinates of the piece of map
 -- that is currently drawn on the screen
 screenBounds :: (MonadFix m) => Level -> ViewSettings -> Auto m Turn (Int,Int,Int,Int) 
-screenBounds level s = proc turn -> do
-  rec
+screenBounds level s =
     let ((_,_),(w, h)) = bounds level
-    (x1,y1,x2,y2) <- delay (1,1, (screenW s), (screenH s)) -< (x1', y1', x2', y2')
-    (px,py) <- playerPos level s -< turn
-    let dx
-          | ((px - x1) <= (padX s)) = (max (px - (padX s)) 1) - x1
-          | ((x2 - px) <= (padX s)) = (min w ((padX s) + px)) - x2
-          | otherwise = 0
-        dy
-          | ((py  - y1) <= (padY s)) =  (max (py - (padY s)) 1) - y1
-          | ((y2 - py) <= (padY s)) =  (min h ((padY s) + py)) - y2
-          | otherwise = 0
-        (x1', y1', x2', y2') = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
-  returnA -< (x1', y1', x2', y2')
+        shiftX (x1,y1,x2,y2) i = if (x1+i >= 1) && (x2 + i <= w)
+                                 then (x1+i,y1,x2+i,y2) else (x1,y1,x2,y2)
+        shiftY (x1,y1,x2,y2) i = if (y1+i >= 1) && (y2+i <= h) 
+                                 then(x1,y1+i,x2,y2+i) else (x1,y1,x2,y2)
+    in proc turn -> do
+      rec
+        bds <- delay (1,1, (screenW s), (screenH s)) -< bds'
+        (px,py) <- playerPos level s -< turn
+        let (x1,y1,x2,y2) = bds
+        let bds' = case turn of
+                     West -> if ((px - x1) <= (padX s))
+                             then (shiftX bds (-1)) else bds
+                     East -> if  ((x2 - px) <= (padX s))
+                             then (shiftX bds 1) else bds
+                     North -> if ((py - y1) <= (padY s)) 
+                              then (shiftY bds (-1)) else bds
+                     South ->  if ((y2 - py) <= (padY s))
+                               then (shiftY bds 1) else bds                
+      returnA -< bds'
 
--- | An auto that tracks the coordinates of the player as she
--- is drawn on the screen
-screenPos :: (MonadFix m) => Level -> ViewSettings -> Auto m Turn (Int,Int)
-screenPos level  s = proc turn -> do
-  ((px,py),(x1,y1,x2,y2)) <- (playerPos level s &&& screenBounds level s) -< turn
-  returnA -< (px - x1 + 1, py - y1 + 1)

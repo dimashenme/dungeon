@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE Arrows #-}
 
 import Control.Auto as A
@@ -48,14 +49,18 @@ initialState = ((startX testSettings,startY testSettings),(1,1,screenW testSetti
 
 logic :: Auto IO Turn ((Int, Int), (Int, Int, Int, Int))
 logic =
-  (screenPos testDungeon testSettings &&& screenBounds testDungeon testSettings)
+  (playerPos testDungeon testSettings &&& screenBounds testDungeon testSettings) 
 
 -- | Render the level and the player
 output :: Vty -> Auto IO  ((Int, Int), (Int, Int, Int, Int)) ()
-output vty = arrM $ \((px,py),rect) ->  do
-  update vty (picForImage (translate 10 5 (renderLevel testDungeon rect)))
-  setCursorPos (outputIface vty) (px-1) (py-1)
+output vty = arrM $ \((px,py), !rect) ->  do
+  update vty (picForLayers
+              [(translate 10 5 (renderLevel testDungeon rect))
+              , string defAttr ("Player pos: " ++ (show (px,py)) ++ "\n" ++ "Bds: " ++ (show $! rect))])
+  let (x1,y1,x2,_) = rect in 
+    setCursorPos (outputIface vty) (px-x1-1+10) (py-y1-1+5)
   showCursor  (outputIface vty)
+    
 
 --- wire everything together
 
@@ -94,7 +99,8 @@ mainLoop a  = do
 
 main :: IO ()
 main = do
-  vty <- mkVty def
+  cfg <- standardIOConfig
+  vty <- mkVty cfg
   showCursor (outputIface vty)
   mainLoop (mainAuto vty)
   shutdown vty
