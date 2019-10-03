@@ -18,8 +18,18 @@ import Data.Default (def)
 import Dungeon.Map
 import Dungeon.Movement as DM
 
-import Dungeon.Controls
 
+import Dungeon.Controls
+import Dungeon.Iface
+
+
+
+testSettings = ViewSettings {
+      padX = 5
+    , padY = 5
+    , screenW = 40
+    , screenH = 20
+  }
 
 testDungeon :: Level
 testDungeon = runSTArray $ do
@@ -30,41 +40,15 @@ testDungeon = runSTArray $ do
   putRoomST (30,24) (40,40) a
   return a
 
--- view settings
+-- | Game state 
 
-testSettings = ViewSettings {
-      DM.padX = 5
-    , DM.padY = 5
-    , DM.screenW = 40
-    , DM.screenH = 20
-    , DM.startX = 2
-    , DM.startY = 10
-  }
+initialState :: (Int, Int)
+initialState = (2,10)
 
-initialState = ((startX testSettings,startY testSettings),(1,1,screenW testSettings,screenH testSettings))
-
--- autos
-
--- | Game state variables
-
-logic :: Auto IO Turn ((Int, Int), (Int, Int, Int, Int))
-logic =
-  (playerPos testDungeon testSettings &&& screenBounds testDungeon testSettings) 
-
--- | Render the level and the player
-output :: Vty -> Auto IO  ((Int, Int), (Int, Int, Int, Int)) ()
-output vty = arrM $ \((px,py), !rect) ->  do
-  update vty (picForLayers
-              [(translate 10 5 (renderLevel testDungeon rect))
-              , string defAttr ("Player pos: " ++ (show (px,py)) ++ "\n" ++ "Bds: " ++ (show $! rect))])
-  let (x1,y1,x2,_) = rect in 
-    setCursorPos (outputIface vty) (px-x1-1+10) (py-y1-1+5)
-  showCursor  (outputIface vty)
-    
 
 --- wire everything together
 
--- | The main loop has rudiment of an mvc architure
+-- |  Rudimentary mvc architure
 -- @logic@ is responsible for updating the game state
 -- based on user input
 -- @output@ draws
@@ -75,15 +59,22 @@ output vty = arrM $ \((px,py), !rect) ->  do
 -- unless it's a Nothing
 mainAuto :: Vty -> Auto IO a (Maybe ())
 mainAuto vty =  
-  let doFirst = proc _ -> do
-        always <- (output vty) . (pure initialState) -< ()
+  let
+    lvl = testDungeon
+    dims = snd $ bounds lvl
+    logic :: Auto IO Turn (Int, Int)
+    logic = A.accum (DM.playerPos dims) initialState
+    output = outputAuto vty dims testSettings 
+    doFirst = proc _ -> do
+        always <- output . (pure (lvl, initialState)) -< ()
         onFor 1 -< Just always
         -- because we never quit at the first iteration       
-      running = proc _ -> do
+    running = proc _ -> do
         inp <- inputVty vty -< ()
         case inp of
           Just i -> do
-            ret <- output vty . logic -< i
+            player <- logic -< i
+            ret <- output -< (lvl, player) 
             returnA -< Just ret
           Nothing -> do returnA -< Nothing
   in doFirst --> running
