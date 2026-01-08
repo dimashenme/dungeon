@@ -1,0 +1,51 @@
+name:                dungeon
+version:             0.1.0.0
+synopsis:            a rudimentary rogulike game
+description:         My attempt to learn myself a Haskell by making something like a roguelike.
+homepage:            http://github.com/dimashenme/dungeon#readme
+license:             BSD3
+license-file:        LICENSE
+author:              Dima Sustretov
+maintainer:          dmitry.sustretov@gmail.com
+copyright:           2016 Dima Sustretov
+category:            Games
+build-type:          Simple
+-- extra-source-files:
+cabal-version:       >=1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     Dungeon.Map, Dungeon.Interface, Dungeon.Game
+  build-depends:       base >= 4.7 && < 5
+                     , dunai
+                     , mtl 
+                     , array
+                     , vty
+                     , vty-crossplatform
+                     , data-default
+  default-language:    Haskell2010
+
+executable dungeon-exe
+  hs-source-dirs:      app
+  main-is:             Main.hs
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  build-depends:       base
+                     , dungeon
+                     , vty
+                     , dunai
+                     , array
+                     , data-default
+  default-language:    Haskell2010
+
+test-suite dungeon-test
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             Spec.hs
+  build-depends:       base
+                     , dungeon
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  default-language:    Haskell2010
+
+source-repository head
+  type:     git
+  location: https://github.com/dimashenme/dungeon

@@ -1,0 +1,45 @@
+
+Game.hs,210
+module Dungeon.Game Dungeon.Game1,2
+testSettings testSettings18,19
+testDungeon testDungeon25,26
+initialState initialState36,37
+mainMSF mainMSF40,41
+runMainMSF runMainMSF67,68
+runGame runGame74,75
+
+Interface.hs,595
+module Dungeon.Interface Dungeon.Interface1,2
+data Turn Turn20,21
+data Turn = North North20,21
+data Turn = North | South South20,21
+data Turn = North | South | West West20,21
+data Turn = North | South | West | EastEast20,21
+data ViewSettings ViewSettings21,22
+data ViewSettings = ViewSettings ViewSettings21,22
+    screenW screenW22,23
+    screenW :: Int, screenH screenH22,23
+    screenW :: Int, screenH :: Int, padX padX22,23
+    screenW :: Int, screenH :: Int, padX :: Int, padY padY22,23
+inputVty inputVty25,26
+playerPos playerPos40,41
+outputMSF outputMSF55,56
+
+Map.hs,439
+module Dungeon.Map Dungeon.Map6,7
+type Level Level27,28
+data CommandCommand33,34
+    = Room Room34,35
+    | DigX DigX35,36
+    | DigY DigY36,37
+type DungeonM DungeonM38,39
+room room40,41
+digX digX43,44
+digY digY46,47
+render render50,51
+type DijkstraGrid DijkstraGrid92,93
+buildDijkstra buildDijkstra94,95
+newLevel newLevel119,120
+printOut printOut123,124
+putRoomST putRoomST135,136
+putRoom putRoom145,146
