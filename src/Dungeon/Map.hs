@@ -1,10 +1,4 @@
 {-# LANGUAGE FlexibleContexts #-}
-{-|
-Module      : Map
-Description : Dungeon map management
-
-This module contains functions for creating maps of dungeons.
--}
 module Dungeon.Map (
     Dungeon,
     DungeonM,

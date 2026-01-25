@@ -3,16 +3,17 @@ module Dungeon.Game where
 
 import Data.Array
 import Control.Arrow
+import Control.Monad (guard, mzero, void)
 import Control.Monad.Trans.MSF
 import Control.Monad.Trans.MSF.Maybe
 import Data.MonadicStreamFunction
-import Data.MonadicStreamFunction.InternalCore
 
 import Graphics.Vty
 import Graphics.Vty.CrossPlatform
 
 import Dungeon.Map
 import Dungeon.Interface as DI
+import Dungeon.Logic
 
 testSettings = ViewSettings {
       padX = 5
@@ -29,52 +30,33 @@ testDungeon = compose $ do
   room (30,24) (40,40)
   digX (20, 20) 10
 
--- | Game state 
+-- | The MSF that ties it all together, running in the `MaybeT IO` monad.
+-- It terminates when `guard` fails.
+mainMSF :: Vty -> MSF (MaybeT IO) () ()
+mainMSF vty =
+  let dung = testDungeon
+      dims = snd $ bounds dung
+      vs = testSettings
+      -- Lift the effectful IO MSFs into the `MaybeT IO` monad
+      input = liftTransS (inputVty vty)
+      output = liftTransS (DI.outputVty vty dims vs)
+      logic = liftTransS (playerPos dims)
 
-initialState :: (Int, Int)
-initialState = (2,10)
+      -- An MSF that terminates the computation if the input is Just DI.Quit.
+      terminateOnQuit = arrM (\u -> if u == Just DI.Quit then mzero else return ())
 
--- | the MSF that ties it all together
--- stop stepping through it when it produces Nothing
-mainMSF :: Vty -> MSF IO () (Maybe ())
-mainMSF vty = 
-  let
-    dung = testDungeon
-    dims = snd $ bounds dung
-    output = outputMSF vty dims testSettings
-    
-    updatePos (Just (Move d)) pos = DI.playerPos dims (Move d) pos
-    updatePos _               pos = pos
+  in proc () -> do
+    userInput <- input -< ()
 
-    trackPlayer = accumulateWith updatePos initialState
+    -- Terminate the MSF if the user quits.
+    _ <- terminateOnQuit -< userInput
 
-    -- The main loop logic
-    running = proc _ -> do
-        inp <- inputVty vty -< ()
-        case inp of
-            Just Quit -> returnA -< Nothing 
-            _ -> do
-                pos <- trackPlayer -< inp 
-                output -< (dung, pos)
-                returnA -< Just ()
+    currentPosition <- iPre initialState <<< logic -< userInput
+    output -< (dung, currentPosition)
 
-    -- The "bootstrap" frame: draws once, then switches to 'running'
-    doFirst = proc _ -> do
-        output -< (dung, initialState)
-        returnA -< (Just (), Just ()) -- The (output, event) for dSwitch
-
-  in dSwitch doFirst (const running)
-
--- | Runs the MSF until it returns Nothing
-runMainMSF :: MSF IO () (Maybe ()) -> IO ()
-runMainMSF msf = do
-    (result, nextMSF) <- unMSF msf ()
-    case result of
-        Just _  -> runMainMSF nextMSF
-        Nothing -> return ()
- 
+-- | Runs the game by reactimating the main MSF until it terminates.
 runGame :: IO ()
 runGame = do
-  vty <- mkVty defaultConfig  
-  runMainMSF (mainMSF vty)
+  vty <- mkVty defaultConfig
+  void $ reactimateMaybe (mainMSF vty)
   shutdown vty
