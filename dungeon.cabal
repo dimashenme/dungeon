@@ -1,17 +1,15 @@
+cabal-version:       3.12
 name:                dungeon
 version:             0.1.0.0
 synopsis:            a rudimentary rogulike game
 description:         My attempt to learn myself a Haskell by making something like a roguelike.
 homepage:            http://github.com/dimashenme/dungeon#readme
-license:             BSD3
-license-file:        LICENSE
+license:             CC-BY-4.0
 author:              Dima Sustretov
 maintainer:          dmitry.sustretov@gmail.com
 copyright:           
 category:            Games
 build-type:          Simple
--- extra-source-files:
-cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
