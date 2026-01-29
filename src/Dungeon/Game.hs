@@ -42,10 +42,6 @@ testDungeon = compose $ do
     room (30,24) (40,40)
     digX (20, 20) 10
 
--- | An MSF that terminates the computation if the input is Just DI.Quit.
-terminateOnQuit :: MSF (MaybeT GameFx) (Maybe DI.Turn) ()
-terminateOnQuit = arrM (\u -> if u == Just DI.Quit then mzero else return ())
-
 -- | The MSF that ties it all together, running in the `MaybeT GameFx` monad.
 mainMSF :: GameState -> MSF (ExceptT () GameFx) () ()
 mainMSF initState = runMSFExcept $ do
