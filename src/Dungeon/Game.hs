@@ -105,10 +105,10 @@ mainMSF initState = runMSFExcept $ do
     try $ proc () -> do
       rec
         gv <- iPre initState -< newGV
-        mbTurn <-  DI.inputVty -< ()
-        newGV <- case mbTurn of
+        mbInput <-  DI.inputVty -< ()
+        newGV <- case mbInput of
                    Just DI.Quit -> throw () -< ()
-                   Just turn -> gameView -< turn
+                   Just (DI.PlayTurn turn) -> gameView -< turn
                    Nothing -> returnA -< gv   
         DI.outputVty -< newGV
       returnA -< ()

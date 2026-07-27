@@ -8,15 +8,17 @@ module Dungeon.Logic
   , Direction(..)
   , HasInitState(..)
   , playerPos
+  , runScriptedGame
   ) where
 
 import Control.Monad.Reader
 import Data.MonadicStreamFunction
+import Data.MonadicStreamFunction.InternalCore (MSF(..))
 import Dungeon.Map
 import Dungeon.Combinators
 
 data Direction = North | South | West | East deriving (Show, Eq)
-data Turn = Move Direction | Quit deriving (Show, Eq)
+data Turn = Move Direction deriving (Show, Eq)
 
 data GameState = GameState
   {
@@ -57,7 +59,6 @@ playerPos = proc input -> do
                              North -> (px, py-1)
                              South -> (px, py+1)
           in if isWalkable dung candidate then candidate else currentPos
-        updatePos dung _ currentPos = currentPos
 
 dungeon :: (MonadReader r m, HasInitState r)
         => MSF m Turn Dungeon
@@ -75,3 +76,18 @@ gameState = proc turn -> do
 gameView :: (MonadReader r m, HasInitState r)
          => MSF m Turn GameState
 gameView = gameState
+
+-- | Run the game-logic MSF with predetermined gameplay turns.
+--
+-- Each output is the view after its corresponding turn has been applied.
+runScriptedGame :: GameState -> [Turn] -> [GameState]
+runScriptedGame initialState turns =
+  runReader (go gameView turns) initialState
+  where
+    go :: MSF (Reader GameState) Turn GameState
+       -> [Turn]
+       -> Reader GameState [GameState]
+    go _ [] = pure []
+    go msf (turn : rest) = do
+      (view, nextMsf) <- unMSF msf turn
+      (view :) <$> go nextMsf rest

@@ -3,6 +3,7 @@
 module Dungeon.Interface (
     Turn(..),
     Direction(..),
+    UIInput(..),
     Config(..),
     HasVty(..),
     inputVty,
@@ -39,6 +40,11 @@ data Config = Config
     , cfgPadding       :: (Int, Int)
     }
 
+-- | A command received from the terminal frontend.
+data UIInput
+    = PlayTurn Turn
+    | Quit
+
 
 -- | Type class for accessing Vty and other common configuration data
 class HasVty r where
@@ -53,7 +59,8 @@ instance HasVty Config where
 
 
 -- | An MSF reading keys frm the terminal.
-inputVty :: (MonadReader r m, HasVty r, MonadIO m) => MSF m () (Maybe Turn)
+inputVty :: (MonadReader r m, HasVty r, MonadIO m)
+         => MSF m () (Maybe UIInput)
 inputVty = arrM $ \_ -> do
     vty <- asks getVty
     evt <- liftIO $ nextEvent vty
@@ -61,10 +68,10 @@ inputVty = arrM $ \_ -> do
         EvKey (KChar c)   [] -> return $ parseInput c
         _                    -> return Nothing
   where
-    parseInput 'h' = Just (Move West)
-    parseInput 'j' = Just (Move South)
-    parseInput 'k' = Just (Move North)
-    parseInput 'l' = Just (Move East)
+    parseInput 'h' = Just (PlayTurn (Move West))
+    parseInput 'j' = Just (PlayTurn (Move South))
+    parseInput 'k' = Just (PlayTurn (Move North))
+    parseInput 'l' = Just (PlayTurn (Move East))
     parseInput 'q' = Just Quit
     parseInput _   = Nothing           -- Returns Nothing for unknown keys
 

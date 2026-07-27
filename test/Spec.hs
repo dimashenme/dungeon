@@ -5,7 +5,13 @@ import Control.Monad.Reader (Reader, runReader)
 import Data.Array ((!), bounds, listArray)
 import Data.MonadicStreamFunction.InternalCore (MSF(..))
 import Dungeon.Interface (HasVty(..), viewport)
-import Dungeon.Logic (Direction(..), GameState(..), Turn(..), playerPos)
+import Dungeon.Logic
+  ( Direction(..)
+  , GameState(..)
+  , Turn(..)
+  , playerPos
+  , runScriptedGame
+  )
 import Dungeon.Map (Dungeon, compose, digX, digY, isWalkable, room)
 import System.Exit (exitFailure)
 
@@ -33,6 +39,7 @@ main = do
     , testMovementAtMapEdge
     , testRepeatedMovement
     , testMovementBlockedByWall
+    , testScriptedGameRunner
     , testViewportAtMapEdges
     , testViewportScrollsAtPadding
     , testViewportPadsSmallDungeon
@@ -209,6 +216,21 @@ testMovementBlockedByWall =
     [(1, 2), (1, 2), (1, 3)]
     (runPlayerMoves (1, 2) testDungeon3
       [Move East, Move East, Move South])
+
+testScriptedGameRunner :: Test
+testScriptedGameRunner = concat <$> sequence
+  [ expectEqual
+      "scripted game outputs the post-turn player positions"
+      [(2, 2), (3, 2), (3, 2)]
+      (map stPlayerPos views)
+  , expectEqual
+      "scripted game retains the dungeon view"
+      [testDungeon2, testDungeon2, testDungeon2]
+      (map stDungeon views)
+  ]
+  where
+    initialState = GameState (1, 2) testDungeon2
+    views = runScriptedGame initialState [Move East, Move East, Move East]
 
 data ViewportConfig = ViewportConfig
   { viewportScreenDims :: (Int, Int)
