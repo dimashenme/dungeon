@@ -41,6 +41,9 @@ test-suite dungeon-test
   main-is:             Spec.hs
   build-depends:       base
                      , dungeon
+                     , array
+                     , dunai
+                     , mtl
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 
