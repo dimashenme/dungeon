@@ -45,17 +45,37 @@ type DungeonM = Writer [Command]
 room :: (Int, Int) -> (Int, Int) -> DungeonM ()
 room p1 p2 = tell [Room p1 p2]
 
+-- | Dig an inclusive horizontal corridor.  If either endpoint meets a room
+-- only at a corner, compose widens the endpoint into a traversable doorway.
 digX :: (Int, Int) -> Int -> DungeonM ()
 digX p l = tell [DigX p l]
 
+-- | Dig an inclusive vertical corridor.  If either endpoint meets a room only
+-- at a corner, compose widens the endpoint into a traversable doorway.
 digY :: (Int, Int) -> Int -> DungeonM ()
 digY p l = tell [DigY p l]
 
--- | Make a map from the description
-compose :: DungeonM () -> Dungeon
-compose dung = 
+-- | Make a map from the description at the requested coordinate scale.
+--
+-- Every room and tunnel endpoint is rounded to the nearest integer after
+-- scaling.  Tunnel lengths are derived from their rounded endpoints, keeping
+-- doors aligned with the rooms they connect at non-integer scales.
+compose :: Float -> DungeonM () -> Dungeon
+compose scale dung =
   let
-    cmds = execWriter dung    
+    cmds = map scaleCommand (execWriter dung)
+    scaleCoordinate n = round (scale * fromIntegral n)
+    scalePoint (x, y) = (scaleCoordinate x, scaleCoordinate y)
+    scaleCommand command = case command of
+      Room p1 p2 -> Room (scalePoint p1) (scalePoint p2)
+      DigX (x, y) len ->
+        let x' = scaleCoordinate x
+            endX' = scaleCoordinate (x + len)
+        in DigX (x', scaleCoordinate y) (endX' - x')
+      DigY (x, y) len ->
+        let y' = scaleCoordinate y
+            endY' = scaleCoordinate (y + len)
+        in DigY (scaleCoordinate x, y') (endY' - y')
     -- Calculate bounds from the description
     (maxW, maxH) = foldl (
       \(mx, my) cmd -> case cmd of
@@ -68,14 +88,46 @@ compose dung =
     bnds = ((1,1),(maxW + 1, maxH + 1))
     digTunnel :: (MArray a Char m ) => a (Int, Int) Char -> (Int, Int) -> Int -> ((Int, Int) -> (Int, Int)) -> m ()
     digTunnel a (p0, s0) len f = do
+      let cardinalNeighbors (x, y) = [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+          surroundingCoordinates (x, y) =
+            [ (x + dx, y + dy)
+            | dx <- [-1 .. 1]
+            , dy <- [-1 .. 1]
+            , (dx, dy) /= (0, 0)
+            ]
+          wallSurroundings position =
+            forM_ (surroundingCoordinates position) $ \neighbor -> do
+              when (inRange bnds neighbor) $ do
+                val <- readArray a neighbor
+                when (val == '.') $ writeArray a neighbor '#'
+          isFloor position =
+            if inRange bnds position
+              then (== ' ') <$> readArray a position
+              else return False
+          hasFloorNeighbor position corridorNeighbor =
+            or <$> forM (filter (/= corridorNeighbor) (cardinalNeighbors position)) isFloor
+          opensRoom position corridorNeighbor = do
+            connected <- hasFloorNeighbor position corridorNeighbor
+            unless connected $ do
+              doorwayWalls <- filterM (isDoorway position) (cardinalNeighbors position)
+              forM_ doorwayWalls $ \wall -> do
+                writeArray a wall ' '
+                wallSurroundings wall
+          isDoorway endpoint wall =
+            if not (inRange bnds wall)
+              then return False
+              else do
+                tile <- readArray a wall
+                if tile /= '#'
+                  then return False
+                  else hasFloorNeighbor wall endpoint
       forM_ [p0 .. p0 + len] $ \p -> do
         let crd = f (p, s0) 
         writeArray a crd ' '
-        forM_ [s0 - 1, s0 + 1] $ \s -> do
-          let sideCoord = f (p, s)
-          when (inRange bnds sideCoord) $ do
-            val <- readArray a sideCoord
-            when (val == '.') $ writeArray a sideCoord '#'        
+        wallSurroundings crd
+      when (len > 0) $ do
+        opensRoom (f (p0, s0)) (f (p0 + 1, s0))
+        opensRoom (f (p0 + len, s0)) (f (p0 + len - 1, s0))
     blankMap = listArray bnds (repeat '.')
   in runSTArray $ do
     ar <- thaw $ blankMap :: ST s (STArray s (Int, Int) Char)
@@ -91,7 +143,6 @@ compose dung =
         DigX (x0, y0) len -> digTunnel ar (x0,y0) len id
 
         DigY (x0, y0) len -> digTunnel ar (y0,x0) len  (\(x,y) -> (y,x))
-        
     return ar
    
 

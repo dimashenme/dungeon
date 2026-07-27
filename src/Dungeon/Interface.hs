@@ -6,7 +6,8 @@ module Dungeon.Interface (
     Config(..),
     HasVty(..),
     inputVty,
-    outputVty
+    outputVty,
+    viewport
 ) where
 
 import Control.Arrow
@@ -79,7 +80,7 @@ outputVty = proc gv -> do
     render -< (gv, vp)
 
 -- | An MSF that calculates the viewport based on the player's position.
-viewport :: (MonadReader r m, HasVty r, MonadIO m)
+viewport :: (MonadReader r m, HasVty r)
          => MSF m ( (Int, Int)
                   ,  (Int, Int))
             (Int, Int, Int, Int)
@@ -94,19 +95,23 @@ viewport = proc (newPlayerPos, dungeonDims) -> do
                    -> (Int, Int)
                    -> (Int, Int, Int, Int)
                    -> m (Int, Int, Int, Int)
-    updateViewport (px', py') (lw, lh) vp@(x1, y1, x2, y2) =
+    updateViewport (px', py') (lw, lh) (x1, y1, x2, y2) =
       reader $
       (\c ->
           let (padX, padY) = getPadding c
-              dx = min (px' - x1 - padX) 0 + max (padX - x2 + px') 0
-              dy = min (py' - y1 - padY) 0 + max (padY - y2 + py') 0
-              shift (sx1, sy1, sx2, sy2) (sdx, sdy) =
-                if (sx1 + sdx >= 1) && (sx2 + sdx <= lw)
-                && (sy1 + sdy >= 1) && (sy2 + sdy <= lh)
-                then (sx1 + sdx, sy1 + sdy, sx2 + sdx, sy2 + sdy)
-                else (sx1, sy1, sx2, sy2)
-          in
-            if dx /= 0 || dy /= 0 then shift vp (dx, dy) else vp
+              vpW = x2 - x1 + 1
+              vpH = y2 - y1 + 1
+              updateAxis position start end mapSize viewportSize padding
+                | mapSize <= viewportSize = 1
+                | position < start + padding =
+                    max 1 (position - padding)
+                | position > end - padding =
+                    min (mapSize - viewportSize + 1)
+                      (position + padding - viewportSize + 1)
+                | otherwise = start
+              x1' = updateAxis px' x1 x2 lw vpW padX
+              y1' = updateAxis py' y1 y2 lh vpH padY
+          in (x1', y1', x1' + vpW - 1, y1' + vpH - 1)
       )
 
 -- | Renders the game state to the Vty terminal.
@@ -116,7 +121,10 @@ render = arrM $ \(gv,  vp@(x1, y1, x2, y2)) -> do
     vty <- asks getVty
     let (px, py) = getPlayerPos gv
     let dung = getDungeon gv
-    let drawRect = vertCat [ string defAttr [ dung ! (x, y) | x <- [x1 .. x2] ]
+    let viewportCell position
+          | inRange (bounds dung) position = dung ! position
+          | otherwise = ' '
+    let drawRect = vertCat [ string defAttr [ viewportCell (x, y) | x <- [x1 .. x2] ]
                            | y <- [y1 .. y2] ]
 
     liftIO $ do
@@ -126,5 +134,3 @@ render = arrM $ \(gv,  vp@(x1, y1, x2, y2)) -> do
                    ])
       setCursorPos (outputIface vty) (px - x1 + 10) (py - y1 + 5)
       showCursor (outputIface vty)
-
-
