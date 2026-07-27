@@ -13,7 +13,6 @@ module Dungeon.Logic
 import Control.Monad.Reader
 import Data.MonadicStreamFunction
 import Dungeon.Map
-import Data.Array
 import Dungeon.Combinators
 
 data Direction = North | South | West | East deriving (Show, Eq)
@@ -39,6 +38,10 @@ class HasInitState r where
   initPlayerPos :: r -> (Int, Int)
   initDungeon   :: r -> Dungeon
 
+instance HasInitState GameState where
+    initPlayerPos = stPlayerPos
+    initDungeon = stDungeon
+
 playerPos :: (MonadReader r m, HasInitState r)
           => MSF m (Dungeon, Turn) (Int, Int)
 playerPos = proc input -> do
@@ -48,15 +51,12 @@ playerPos = proc input -> do
         updatePosA = arr $ uncurry $ uncurry updatePos
         updatePos :: Dungeon -> Turn -> (Int, Int) -> (Int, Int)
         updatePos dung (Move dir) currentPos@(px,py) =
-          let (_, (w, h)) = bounds dung
-              (px', py') = case dir of
+          let candidate = case dir of
                              West  -> (px-1, py)
                              East  -> (px+1, py)
                              North -> (px, py-1)
                              South -> (px, py+1)
-              inBounds x y = x >= 1 && x <= w && y >= 1 && y <= h
-          in
-            if inBounds px' py' then (px', py') else currentPos
+          in if isWalkable dung candidate then candidate else currentPos
         updatePos dung _ currentPos = currentPos
 
 dungeon :: (MonadReader r m, HasInitState r)
@@ -75,4 +75,3 @@ gameState = proc turn -> do
 gameView :: (MonadReader r m, HasInitState r)
          => MSF m Turn GameState
 gameView = gameState
-

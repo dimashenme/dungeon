@@ -6,6 +6,7 @@ module Dungeon.Map (
     digX,
     digY,
     compose,
+    isWalkable,
     buildDijkstra
 ) where
 
@@ -20,6 +21,14 @@ import Data.Default (def)
 
 -- | Map of a dungeon 
 type Dungeon = Array (Int,Int) Char
+
+-- | Whether a position can be occupied by a walking entity.
+--
+-- A carved floor is represented by a space.  Walls, undug terrain, and
+-- positions outside the dungeon are not walkable.
+isWalkable :: Dungeon -> (Int, Int) -> Bool
+isWalkable dungeon position =
+    inRange (bounds dungeon) position && dungeon ! position == ' '
 
 -------------------------------------------------------------------------------
 -- DungeonM 
