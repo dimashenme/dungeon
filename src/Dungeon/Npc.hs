@@ -149,7 +149,6 @@ floorEvtsFromKill freshItemId selectLoot = mapMaybeS $ arrM $ \event -> do
     pure
         (PlaceItemEvt
             pos
-            Nothing
             ident
             (corpseItem (npcKind npc) loot))
 

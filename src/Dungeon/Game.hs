@@ -3,6 +3,7 @@
 module Dungeon.Game
     ( gameStateWithMessages
     , gameView
+    , gameViewInput
     , messageLog
     , mainMSF
     , runGame
@@ -23,6 +24,7 @@ import Data.MonadicStreamFunction.InternalCore (MSF(..))
 import Graphics.Vty
 import Graphics.Vty.CrossPlatform
 
+import Dungeon.GameData (observe)
 import Dungeon.Interface as DI
 import Dungeon.Logic
 import Dungeon.Combinators
@@ -50,7 +52,7 @@ gameStateWithMessages init = proc turn -> do
         let currentPosition = plPos (stPlayer state)
         let observationMsgs
                 | currentPosition /= previousPosition || turn == Inspect =
-                    DI.observe currentPosition (stFloorItems state)
+                    observe currentPosition (stFloorItems state)
                 | otherwise = []
     returnA -< (state, msgs ++ observationMsgs)
 
@@ -73,9 +75,18 @@ gameView
     => GameState
     -> MSF m Turn GameView
 gameView init =
-    gameStateWithMessages init
-        >>> second messageLog
-        >>> arr (uncurry (flip toGameView))
+    arr (\turn -> (Just turn, []))
+        >>> gameViewInput init
+
+gameViewInput
+    :: MonadFix m
+    => GameState
+    -> MSF m (Maybe Turn, [String]) GameView
+gameViewInput init = proc (turn, frontendMsgs) -> do
+    result <- mapMaybeS (gameStateWithMessages init) -< turn
+    currentState <- sampleAndHold init (arr id) -< fst <$> result
+    msgs <- messageLog -< maybe [] snd result ++ frontendMsgs
+    returnA -< toGameView msgs currentState
 
 messageLog :: Monad m => MSF m [String] [String]
 messageLog = accumulateWith (flip (++)) []
@@ -87,26 +98,32 @@ mainMSF initState = runMSFExcept $ do
     let initView = toGameView [] initState
     try $
         doOnce
-            (DI.outputVty <<< arr (const (DI.DungeonScreen initView)))
+            (DI.outputVty <<< arr (const (initView, DI.DungeonScreen)))
     try $ proc () -> do
         rec
             prevView <- iPre initView -< nextView
-            input <- DI.inputVty -< ()
-            (nextView, screen) <- case input of
-                Just DI.Quit -> throw () -< ()
-                Just (DI.PlayTurn turn) ->
-                    gameView initState
-                        >>> arr (\view -> (view, DI.DungeonScreen view))
-                        -< turn
-                Just DI.ShowInventory ->
-                    returnA -<
-                        (prevView, DI.InventoryScreen prevView)
-                Just DI.Redraw ->
-                    returnA -< (prevView, DI.DungeonScreen prevView)
-                Nothing ->
-                    returnA -< (prevView, DI.DungeonScreen prevView)
-            DI.outputVty -< screen
+            key <- DI.inputVty -< ()
+            (modes, input) <- DI.uiState -< (key, prevView)
+            let (quitRequested, nextGameInput) = routeUIInput input
+            _ <- case quitRequested of
+                True -> throw () -< ()
+                _ -> returnA -< ()
+            nextView <- gameViewInput initState -< nextGameInput
+            let mode = case modes of
+                    current : _ -> current
+                    [] -> DI.DungeonScreen
+            DI.outputVty -< (nextView, mode)
         returnA -< ()
+    where
+        routeUIInput
+            :: Maybe DI.UIInput
+            -> (Bool, (Maybe Turn, [String]))
+        routeUIInput Nothing = (False, (Nothing, []))
+        routeUIInput (Just (DI.PlayTurn turn)) =
+            (False, (Just turn, []))
+        routeUIInput (Just (DI.LogMessage msg)) =
+            (False, (Nothing, [msg]))
+        routeUIInput (Just DI.Quit) = (True, (Nothing, []))
 
 -- | Runs the game by reactimating the main MSF until it terminates.
 runGame :: IO ()
@@ -119,7 +136,7 @@ runGame = do
                 (RandomSeed 1)
     let config = DI.Config
             { cfgVty = vty
-            , cfgScreenDims = (80, 30)
+            , cfgViewportDims = (48, 18)
             , cfgPadding = (5, 5)
             }
     void

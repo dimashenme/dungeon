@@ -1,5 +1,6 @@
 module Dungeon.Types
     ( Direction(..)
+    , ItemId(..)
     , Turn(..)
     , TurnHoldUp(..)
     , GameSettings(..)
@@ -20,6 +21,8 @@ module Dungeon.Types
     , Armour(..)
     ) where
 
+import Data.Word (Word64)
+
 data Direction
     = North
     | South
@@ -27,10 +30,15 @@ data Direction
     | East
     deriving (Show, Eq)
 
+newtype ItemId = ItemId Word64
+    deriving (Show, Eq, Ord)
+
 data Turn
     = Move Direction
-    | Pick
-    | Drop
+    | Pick ItemId
+    | Loot ItemId ItemId
+    | Drop ItemId
+    | Wield ItemId
     | Wait
     | Inspect
     deriving (Show, Eq)

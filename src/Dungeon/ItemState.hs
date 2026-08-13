@@ -18,7 +18,6 @@ module Dungeon.ItemState
 import Control.Arrow (arr)
 import Control.Monad.Except (MonadError, throwError)
 import Control.Monad.Writer.Class (MonadWriter, tell)
-import Data.Maybe (fromMaybe)
 import Data.MonadicStreamFunction
     ( MSF
     , arrM
@@ -28,21 +27,20 @@ import qualified Data.Map.Strict as Map
 import Dungeon.Combinators (accumulateMaybe)
 import Dungeon.GameData
     ( dropMessage
+    , lootMessage
     , pickupMessage
     )
 import Dungeon.Item
-    ( FloorItems
+    ( Container(..)
+    , FloorItems
     , Inventory
-    , Item
+    , Item(..)
     , ItemId
-    , firstContainer
     , itemStackNull
     , itemsAt
-    , placeInContainer
-    , popItem
-    , pickupCandidate
+    , lookupItem
     , pushItem
-    , removeFromFloorStack
+    , removeFromContainer
     , removeItem
     )
 import Dungeon.Map (Position)
@@ -50,6 +48,7 @@ import Dungeon.Types (Turn(..), TurnHoldUp(..))
 
 data PickupEvt = PickupEvt
     { pickupPosition :: Position
+    , pickupContainer :: Maybe (ItemId, Container)
     , pickupItemId :: ItemId
     , pickupItem :: Item
     }
@@ -63,8 +62,8 @@ data DropEvt = DropEvt
     deriving (Show, Eq)
 
 data FloorItemsEvt
-    = PlaceItemEvt Position (Maybe ItemId) ItemId Item
-    | RemoveItemEvt Position ItemId
+    = PlaceItemEvt Position ItemId Item
+    | RemoveItemEvt Position (Maybe ItemId) ItemId
     deriving (Show, Eq)
 
 data InventoryEvt
@@ -79,12 +78,19 @@ pickupEvts
          (Turn, Position, FloorItems)
          (Maybe PickupEvt)
 pickupEvts = arrM $ \(turn, pos, floorItems) ->
-    case turn of
-        Pick ->
+    let stack = itemsAt pos floorItems
+        emit source ident =
             maybe
                 (throwError TurnHoldUp)
-                (pure . Just . uncurry (PickupEvt pos))
-                (pickupCandidate $ itemsAt pos floorItems)
+                (pure . Just . PickupEvt pos source ident)
+                (lookupItem ident $ maybe stack (containerItems . snd) source)
+    in case turn of
+        Pick ident -> emit Nothing ident
+        Loot containerId ident ->
+            case lookupItem containerId stack of
+                Just (ContainerItem container) ->
+                    emit (Just (containerId, container)) ident
+                _ -> throwError TurnHoldUp
         _ -> pure Nothing
 
 dropEvts
@@ -95,11 +101,11 @@ dropEvts
          (Maybe DropEvt)
 dropEvts = arrM $ \(turn, pos, inventory) ->
     case turn of
-        Drop ->
+        Drop ident ->
             maybe
                 (throwError TurnHoldUp)
-                (pure . Just . uncurry (DropEvt pos))
-                (fst <$> popItem inventory)
+                (pure . Just . DropEvt pos ident)
+                (lookupItem ident inventory)
         _ -> pure Nothing
 
 floorEvtsFromPickup
@@ -108,33 +114,30 @@ floorEvtsFromPickup
 floorEvtsFromPickup = mapMaybeS $ arr $ \event ->
     RemoveItemEvt
         (pickupPosition event)
+        (fst <$> pickupContainer event)
         (pickupItemId event)
 
 inventoryEvtsFromPickup
     :: MonadWriter [String] m
     => MSF m (Maybe PickupEvt) (Maybe InventoryEvt)
 inventoryEvtsFromPickup = mapMaybeS $ arrM $ \event -> do
-    tell [pickupMessage (pickupPosition event) (pickupItem event)]
+    let message =
+            case pickupContainer event of
+                Nothing -> pickupMessage
+                Just (_, container) -> \pos item ->
+                    lootMessage pos item container
+    tell [message (pickupPosition event) (pickupItem event)]
     pure (AddItemEvt (pickupItemId event) (pickupItem event))
 
 floorEvtsFromDrop
     :: MonadWriter [String] m
-    => MSF
-         m
-         (Maybe (DropEvt, FloorItems))
-         (Maybe FloorItemsEvt)
-floorEvtsFromDrop = mapMaybeS $ arrM $ \(event, floorItems) -> do
+    => MSF m (Maybe DropEvt) (Maybe FloorItemsEvt)
+floorEvtsFromDrop = mapMaybeS $ arrM $ \event -> do
     let pos = dropPosition event
         ident = dropItemId event
         item = dropItem event
-        target = firstContainer (itemsAt pos floorItems)
-    tell [dropMessage pos item (snd <$> target)]
-    pure
-        (PlaceItemEvt
-            pos
-            (fst <$> target)
-            ident
-            item)
+    tell [dropMessage pos item]
+    pure (PlaceItemEvt pos ident item)
 
 inventoryEvtsFromDrop
     :: Monad m
@@ -149,19 +152,21 @@ floorItemsState = accumulateMaybe applyFloorItemsEvt
     where
         applyFloorItemsEvt event floorItems =
             case event of
-                RemoveItemEvt pos ident ->
-                    case removeFromFloorStack ident (itemsAt pos floorItems) of
-                        Just stack -> replaceAt pos stack floorItems
-                        Nothing -> floorItems
-                PlaceItemEvt pos target ident item ->
+                RemoveItemEvt pos source ident ->
                     let stack = itemsAt pos floorItems
-                        placeOnFloor = pushItem ident item stack
-                        stack' =
-                            fromMaybe placeOnFloor
-                                $ target >>= \containerId ->
-                                    placeInContainer
-                                        containerId ident item stack
-                    in replaceAt pos stack' floorItems
+                        removed =
+                            case source of
+                                Nothing -> snd <$> removeItem ident stack
+                                Just containerId ->
+                                    removeFromContainer containerId ident stack
+                    in case removed of
+                        Just stack' -> replaceAt pos stack' floorItems
+                        Nothing -> floorItems
+                PlaceItemEvt pos ident item ->
+                    replaceAt
+                        pos
+                        (pushItem ident item $ itemsAt pos floorItems)
+                        floorItems
 
         replaceAt pos stack
             | itemStackNull stack = Map.delete pos

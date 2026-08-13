@@ -22,21 +22,16 @@ module Dungeon.Item
     , removeItem
     , lookupItem
     , replaceItem
-    , pickupCandidate
-    , removeFromFloorStack
-    , placeInContainer
-    , firstContainer
+    , containersIn
+    , removeFromContainer
     ) where
 
-import Control.Applicative ((<|>))
 import Control.Monad (guard)
-import Data.Foldable (asum, toList)
+import Data.Foldable (toList)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (listToMaybe)
 import Data.Sequence (Seq, ViewL(..), (<|))
 import qualified Data.Sequence as Seq
-import Data.Word (Word64)
 import Dungeon.Map (Position)
 import Dungeon.Types
     ( Armour
@@ -47,10 +42,8 @@ import Dungeon.Types
     , Ring
     , Scroll
     , Weapon
+    , ItemId(..)
     )
-
-newtype ItemId = ItemId Word64
-    deriving (Show, Eq, Ord)
 
 data ContainerKind
     = ChestContainer
@@ -59,7 +52,6 @@ data ContainerKind
 
 data Container = Container
     { containerKind :: ContainerKind
-    , containerPortable :: Bool
     , containerItems :: ItemStack
     }
     deriving (Show, Eq)
@@ -115,11 +107,11 @@ appendItemStacks left right =
     itemStackFromList (itemStackToList left ++ itemStackToList right)
 
 chestItem :: ItemStack -> Item
-chestItem = ContainerItem . Container ChestContainer True
+chestItem = ContainerItem . Container ChestContainer
 
 corpseItem :: NpcKind -> ItemStack -> Item
 corpseItem kind =
-    ContainerItem . Container (CorpseContainer kind) False
+    ContainerItem . Container (CorpseContainer kind)
 
 itemsAt :: Position -> FloorItems -> ItemStack
 itemsAt pos = Map.findWithDefault emptyItemStack pos
@@ -167,50 +159,24 @@ replaceItem ident item stack = do
         { stackItems = Map.insert ident item (stackItems stack)
         }
 
-pickupCandidate :: ItemStack -> Maybe (ItemId, Item)
-pickupCandidate stack =
-    case firstContainer stack of
-        Nothing -> fst <$> popItem stack
-        Just (ident, container) ->
-            fst <$> popItem (containerItems container)
-            <|> (ident, ContainerItem container)
-                <$ guard (containerPortable container)
+containersIn :: ItemStack -> [(ItemId, Container)]
+containersIn stack =
+    [ (ident, container)
+    | (ident, ContainerItem container) <- itemStackToList stack
+    ]
 
-removeFromFloorStack :: ItemId -> ItemStack -> Maybe ItemStack
-removeFromFloorStack ident stack =
-    snd <$> removeItem ident stack
-    <|> asum
-        [ removeFromContainer containerId container
-        | (containerId, ContainerItem container) <- itemStackToList stack
-        ]
-    where
-        removeFromContainer containerId container = do
-            (_, contents') <- removeItem ident (containerItems container)
-            replaceItem
-                containerId
-                (ContainerItem container { containerItems = contents' })
-                stack
-
-placeInContainer
+removeFromContainer
     :: ItemId
     -> ItemId
-    -> Item
     -> ItemStack
     -> Maybe ItemStack
-placeInContainer containerId ident item stack = do
+removeFromContainer containerId ident stack = do
     ContainerItem container <- lookupItem containerId stack
+    (_, contents') <- removeItem ident (containerItems container)
     replaceItem
         containerId
         (ContainerItem
             container
-                { containerItems =
-                    pushItem ident item (containerItems container)
+                { containerItems = contents'
                 })
         stack
-
-firstContainer :: ItemStack -> Maybe (ItemId, Container)
-firstContainer stack =
-    listToMaybe
-        [ (ident, container)
-        | (ident, ContainerItem container) <- itemStackToList stack
-        ]

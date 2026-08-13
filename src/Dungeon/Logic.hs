@@ -26,6 +26,7 @@ module Dungeon.Logic
     , wetStatusState
     , wetStatusMessages
     , playerState
+    , wieldedState
     , gameState
     , toGameView
     ) where
@@ -33,6 +34,7 @@ module Dungeon.Logic
 import Prelude hiding (init)
 import Control.Applicative ((<|>))
 import Control.Monad (when)
+import Control.Monad.Except (MonadError, throwError)
 import Control.Monad.Fix (MonadFix)
 import Control.Monad.Reader.Class (MonadReader, asks)
 import Control.Monad.State.Class (MonadState, get)
@@ -66,7 +68,13 @@ import Dungeon.GameData
     )
 import Dungeon.Item
 import Dungeon.ItemState
-import Dungeon.Map (Dungeon, Position, isWalkable, isWater)
+import Dungeon.Map
+    ( Dungeon
+    , Position
+    , isWalkable
+    , isWater
+    , movePosition
+    )
 import Dungeon.Npc
 import Dungeon.Random (RandomSeed(..), selectRandomSubset)
 import Dungeon.Types
@@ -89,6 +97,7 @@ data Player = Player
     { plPos :: Position
     , plAttributes :: CharAttributes
     , plInventory :: Inventory
+    , plWielded :: Maybe ItemId
     , plWetStatus :: WetStatus
     , plWetCountdown :: Int
     , plFightMode :: FightMode
@@ -109,6 +118,7 @@ initPlayer pos =
         { plPos = pos
         , plAttributes = initialPlayerAttributes
         , plInventory = emptyItemStack
+        , plWielded = Nothing
         , plWetStatus = Dry
         , plWetCountdown = 0
         , plFightMode = Exploring
@@ -117,15 +127,10 @@ initPlayer pos =
 nextPos
     :: MonadWriter [String] m
     => MSF (ExceptT TurnHoldUp m) (Turn, Dungeon, Position) Position
-nextPos = arrM $ \(turn, dungeon, pos@(x, y)) ->
+nextPos = arrM $ \(turn, dungeon, pos) ->
     case turn of
         Move dir ->
-            let attempted =
-                    case dir of
-                        West -> (x - 1, y)
-                        East -> (x + 1, y)
-                        North -> (x, y - 1)
-                        South -> (x, y + 1)
+            let attempted = movePosition dir pos
             in if isWalkable dungeon attempted
                 then pure attempted
                 else do
@@ -236,6 +241,22 @@ playerState init = proc (dungeon, player, tickEvt) -> do
             , plWetCountdown = count
             }
 
+wieldedState
+    :: MonadError TurnHoldUp m
+    => Maybe ItemId
+    -> MSF m (Turn, Inventory) (Maybe ItemId)
+wieldedState init = feedback init $ arrM $ \((turn, inventory), wielded) -> do
+    wielded' <-
+        case turn of
+            Wield ident ->
+                case lookupItem ident inventory of
+                    Just (WeaponItem _) -> pure (Just ident)
+                    _ -> throwError TurnHoldUp
+            Drop ident
+                | wielded == Just ident -> pure Nothing
+            _ -> pure wielded
+    pure (wielded', wielded')
+
 data GameState = GameState
     { stPlayer :: Player
     , stDungeon :: Dungeon
@@ -324,9 +345,7 @@ gameStateAttempt init = proc turn -> do
 
         floorRemoveEvt <- floorEvtsFromPickup -< pickupEvt
         inventoryAddEvt <- inventoryEvtsFromPickup -< pickupEvt
-        let dropEvtWithFloor =
-                fmap (\evt -> (evt, floorItems)) dropEvt
-        floorPlaceEvt <- floorEvtsFromDrop -< dropEvtWithFloor
+        floorPlaceEvt <- floorEvtsFromDrop -< dropEvt
         inventoryRemoveEvt <- inventoryEvtsFromDrop -< dropEvt
         corpsePlaceEvt <-
             floorEvtsFromKill freshItemId selectLoot -< killedEvt
@@ -336,6 +355,8 @@ gameStateAttempt init = proc turn -> do
             floorItemsState (stFloorItems init) -< floorEvt
         inventory' <-
             inventoryState initInventory -< inventoryEvt
+        wielded' <-
+            wieldedState (plWielded initPlayerState) -< (turn, inventory)
 
         npcs' <-
             npcsState (stDungeon init) (stNpcs init)
@@ -350,6 +371,7 @@ gameStateAttempt init = proc turn -> do
                 initPlayerState
                     { plPos = pos'
                     , plInventory = inventory'
+                    , plWielded = wielded'
                     , plFightMode = fight
                     }
 

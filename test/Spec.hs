@@ -36,11 +36,17 @@ import qualified Dungeon.Game as Game
 import Dungeon.GameData
 import Dungeon.Interface
     ( HasVty(..)
+    , UIKey(..)
     , UIInput(..)
+    , UIMode(..)
+    , choicePageSize
     , gameViewCell
-    , inventoryLines
     , messageLogLines
+    , pageChoices
     , parseInput
+    , playerStatsLines
+    , screenLines
+    , uiStep
     , viewport
     )
 import Dungeon.Item
@@ -81,9 +87,11 @@ main = do
                 , testEncounterMessages
                 , testGameView
                 , testInput
+                , testAttackConfirmation
+                , testItemInteractionUI
+                , testWielding
                 , testItemPresentation
                 , testRendering
-                , testInventoryLines
                 , testMessageLogLines
                 , testViewport
                 , testOneTickThenTiming
@@ -172,9 +180,9 @@ testLayoutReferences = checks
 testCharacterInitialization :: Test
 testCharacterInitialization = checks
     [ expectEqual
-        "player initialization uses authored attributes and an empty inventory"
-        (initialPlayerAttributes, emptyItemStack)
-        (plAttributes player, plInventory player)
+        "player initialization uses authored attributes and empty item state"
+        (initialPlayerAttributes, emptyItemStack, Nothing)
+        (plAttributes player, plInventory player, plWielded player)
     , expectEqual
         "NPC initialization uses authored attributes and supplied inventory"
         (initialNpcAttributes, inventory)
@@ -241,8 +249,13 @@ testSampleLayout = checks
 testTerrain :: Test
 testTerrain = checks
     [ expectEqual "room boundary is a wall" '#' (dungeon ! (2, 3))
-    , expectEqual "room interior is floor" ' ' (dungeon ! (3, 3))
-    , expectEqual "tunnel is floor" ' ' (dungeon ! (8, 4))
+    , expectEqual "room interior is floor" '.' (dungeon ! (3, 3))
+    , expectEqual "tunnel is floor" '.' (dungeon ! (8, 4))
+    , expectEqual "space is vacuum outside rooms" ' ' (dungeon ! (1, 1))
+    , expectEqual
+        "vacuum is not walkable"
+        False
+        (isWalkable dungeon (1, 1))
     , expectEqual "water is walkable" True (isWalkable dungeon (4, 4))
     , expectEqual "water is recognized" True (isWater dungeon (4, 4))
     , expectEqual "outside the map is blocked" False (isWalkable dungeon (0, 0))
@@ -638,7 +651,7 @@ testItemTransfers = checks
     , expectEqual
         "item event projections preserve absent samples themselves"
         [ Nothing
-        , Just (RemoveItemEvt pos (ItemId 1))
+        , Just (RemoveItemEvt pos Nothing (ItemId 1))
         ]
         (runIdentity
             $ embed
@@ -647,23 +660,24 @@ testItemTransfers = checks
                 , Just
                     PickupEvt
                         { pickupPosition = pos
+                        , pickupContainer = Nothing
                         , pickupItemId = ItemId 1
                         , pickupItem = redItem
                         }
                 ])
     , expectEqual
-        "Pick transfers the top floor identity and value to inventory"
-        ( [(ItemId 2, blueItem)]
-        , [(ItemId 1, redItem)]
+        "Pick transfers the selected floor identity and value to inventory"
+        ( [(ItemId 1, redItem)]
+        , [(ItemId 2, redItem)]
         )
         ( itemStackToList (itemsAt pos (stFloorItems picked))
         , itemStackToList (inventoryOf picked)
         )
     , expectEqual
-        "Drop transfers the inventory head identity and value to the floor"
+        "Drop transfers the selected inventory identity and value to the floor"
         ( [ (ItemId 3, ringItem)
           , (ItemId 1, redItem)
-          , (ItemId 2, blueItem)
+          , (ItemId 2, redItem)
           ]
         , []
         )
@@ -679,15 +693,19 @@ testItemTransfers = checks
         popResult ((ident, item), stack) =
             (ident, item, itemStackItems stack)
         pos = (2, 2)
-        floorItems = Map.singleton pos (testStack 1 [redItem, blueItem])
+        floorItems = Map.singleton pos (testStack 1 [redItem, redItem])
         gameInit = setFloor floorItems (emptyGameState pos testDungeon)
-        picked = singleSample (runScriptedGame gameInit [Pick])
+        picked = singleSample (runScriptedGame gameInit [Pick (ItemId 2)])
         dropped =
             singleSample
                 $ runScriptedGame
                     (setInventory (testStack 3 [ringItem]) gameInit)
-                    [Drop]
-        gameStates = runScriptedGame gameInit [Pick, Pick, Pick]
+                    [Drop (ItemId 3)]
+        gameStates = runScriptedGame gameInit
+            [ Pick (ItemId 1)
+            , Pick (ItemId 2)
+            , Pick (ItemId 99)
+            ]
 
 data StackOp
     = PushStack ItemId Item
@@ -758,19 +776,13 @@ testItemStateReducers = checks
         (initialFloor, initialInventory)
         (unknownFloorRemoval, unknownInventoryRemoval)
     , expectEqual
-        "an invalid container target falls back to loose floor placement"
+        "floor placement always prepends the item"
         [blueItem, redItem]
-        (itemStackItems (itemsAt pos invalidTargetPlacement))
+        (itemStackItems (itemsAt pos floorPlacement))
     , expectEqual
-        "Drop messages distinguish the floor, a chest, and a corpse"
-        [ "dropped a ring of protection at (2,2)"
-        , "dropped a ring of protection into a chest at (2,2)"
-        , "dropped a ring of protection into the corpse of the goblin at (2,2)"
-        ]
-        [ messageForDrop Map.empty
-        , messageForDrop chestFloor
-        , messageForDrop corpseFloor
-        ]
+        "Drop reports a floor destination"
+        ["dropped a ring of protection at (2,2)"]
+        dropMessages
     ]
     where
         pos = (2, 2)
@@ -781,20 +793,20 @@ testItemStateReducers = checks
                 $ runIdentity
                 $ embed
                     (floorItemsState initialFloor)
-                    [Just (RemoveItemEvt pos (ItemId 1))]
+                    [Just (RemoveItemEvt pos Nothing (ItemId 1))]
         unknownFloorRemoval =
             singleSample
                 $ runIdentity
                 $ embed
                     (floorItemsState initialFloor)
-                    [Just (RemoveItemEvt pos (ItemId 99))]
+                    [Just (RemoveItemEvt pos Nothing (ItemId 99))]
         unknownInventoryRemoval =
             singleSample
                 $ runIdentity
                 $ embed
                     (inventoryState initialInventory)
                     [Just (RemoveEvt (ItemId 99))]
-        invalidTargetPlacement =
+        floorPlacement =
             singleSample
                 $ runIdentity
                 $ embed
@@ -802,7 +814,6 @@ testItemStateReducers = checks
                     [ Just
                         (PlaceItemEvt
                             pos
-                            (Just (ItemId 99))
                             (ItemId 2)
                             blueItem)
                     ]
@@ -812,99 +823,106 @@ testItemStateReducers = checks
                 , dropItemId = ItemId 10
                 , dropItem = ringItem
                 }
-        messageForDrop floorItems =
-            case snd
-                    $ runWriter
-                    $ embed
-                        floorEvtsFromDrop
-                        [Just (dropEvent, floorItems)] of
-                [message] -> message
-                _ -> error "expected exactly one Drop message"
-        chestFloor =
-            Map.singleton pos (testStack 1 [chestItem emptyItemStack])
-        corpseFloor =
-            Map.singleton
-                pos
-                (testStack 1 [corpseItem Goblin emptyItemStack])
+        dropMessages = snd $ runWriter $ embed floorEvtsFromDrop [Just dropEvent]
 
 testContainerTransfers :: Test
 testContainerTransfers = checks
     [ expectEqual
-        "Pick uses the first container even below a loose item"
-        [redItem]
-        (inventoryItems afterContents)
-    , expectEqual
-        "an empty portable container can itself be picked up"
-        [chestItem emptyItemStack, redItem]
-        (inventoryItems afterContainer)
-    , expectEqual
-        "an empty non-portable corpse blocks access to lower items"
-        (0, [corpseItem Goblin emptyItemStack, blueItem], [])
-        ( stTurnNumber blockedResult
-        , itemStackItems (itemsAt pos (stFloorItems blockedResult))
-        , inventoryItems blockedResult
+        "Pick transfers a selected container with its contents"
+        ( [greenItem]
+        , [chestItem (testStack 10 [redItem])]
+        )
+        ( itemStackItems (itemsAt pos $ stFloorItems pickedContainer)
+        , inventoryItems pickedContainer
         )
     , expectEqual
-        "Drop inserts into the first container and leaves later ones unchanged"
-        [[ringItem], [blueItem]]
-        (map itemStackItems (containerStacks pos dropped))
-    , expectEqual
-        "container transfers preserve item identities"
-        ([ItemId 10], [ItemId 2, ItemId 10])
-        ( itemStackIds (firstContainerItems pos dropped)
-        , itemStackIds (inventoryOf afterContainer)
+        "Loot transfers only the selected item from the selected container"
+        ( [blueItem]
+        , [redItem]
+        )
+        ( itemStackItems (firstContainerItems pos looted)
+        , inventoryItems looted
         )
     , expectEqual
-        "nested removal searches later containers for the requested identity"
+        "Loot reports the selected source container"
+        ["looted a red gem from the chest at (2,2)"]
+        lootedMessages
+    , expectEqual
+        "corpses are pickable together with their contents"
+        [corpseItem Goblin (testStack 30 [ringItem])]
+        (inventoryItems pickedCorpse)
+    , expectEqual
+        "Loot validates the selected container identity"
+        (0, [], floorBeforeInvalidLoot)
+        ( stTurnNumber invalidLoot
+        , inventoryItems invalidLoot
+        , stFloorItems invalidLoot
+        )
+    , expectEqual
+        "Drop remains on the floor beside containers"
+        ( [ringItem, chestItem emptyItemStack]
+        , []
+        )
+        ( itemStackItems (itemsAt pos $ stFloorItems dropped)
+        , inventoryItems dropped
+        )
+    , expectEqual
+        "container removal is scoped to the selected container"
         (Just
             [ chestItem (testStack 10 [redItem])
             , chestItem emptyItemStack
             ])
         (itemStackItems
-            <$> removeFromFloorStack
+            <$> removeFromContainer
+                (ItemId 2)
                 (ItemId 20)
                 nestedRemovalStack)
     ]
     where
         pos = (2, 2)
-        init =
+        base =
             setFloor
                 (Map.singleton pos
                     (testStack 1
                         [ greenItem
                         , chestItem (testStack 10 [redItem])
-                        , corpseItem Goblin emptyItemStack
                         ]))
                 (emptyGameState pos testDungeon)
-        (afterContents, afterContainer) =
-            case runScriptedGame init [Pick, Pick] of
-                [first, second] -> (first, second)
-                _ -> error "expected two item-transfer samples"
-        blockedResult =
-            singleSample
-                $ runScriptedGame
-                    (setFloor
-                        (Map.singleton pos
-                            (testStack 1
-                                [ corpseItem Goblin emptyItemStack
-                                , blueItem
-                                ]))
-                        (emptyGameState pos testDungeon))
-                    [Pick]
+        pickedContainer = singleSample
+            $ runScriptedGame base [Pick (ItemId 2)]
+        (looted, lootedMessages) = singleSample
+            $ runScriptedGameWithMessages
+                (setFloor
+                    (Map.singleton pos
+                        (testStack 1
+                            [chestItem (testStack 10 [redItem, blueItem])]))
+                    (emptyGameState pos testDungeon))
+                [Loot (ItemId 1) (ItemId 10)]
+        pickedCorpse = singleSample
+            $ runScriptedGame
+                (setFloor
+                    (Map.singleton pos
+                        (testStack 1
+                            [corpseItem Goblin (testStack 30 [ringItem])]))
+                    (emptyGameState pos testDungeon))
+                [Pick (ItemId 1)]
+        floorBeforeInvalidLoot =
+            Map.singleton pos
+                (testStack 1 [chestItem (testStack 10 [redItem])])
+        invalidLoot = singleSample
+            $ runScriptedGame
+                (setFloor floorBeforeInvalidLoot
+                    $ emptyGameState pos testDungeon)
+                [Loot (ItemId 99) (ItemId 10)]
         dropped =
             singleSample
                 $ runScriptedGame
-                    (setInventory (testStack 10 [ringItem])
+                    (setInventory (testStack 20 [ringItem])
                         $ setFloor
                             (Map.singleton pos
-                                (testStack 1
-                                    [ greenItem
-                                    , chestItem emptyItemStack
-                                    , corpseItem Goblin
-                                        (testStack 20 [blueItem])
-                                    ]))
+                                (testStack 1 [chestItem emptyItemStack]))
                             (emptyGameState pos testDungeon))
-                    [Drop]
+                    [Drop (ItemId 20)]
         nestedRemovalStack =
             testStack 1
                 [ chestItem (testStack 10 [redItem])
@@ -1106,26 +1124,252 @@ testGameView =
             setFloor
                 (Map.singleton (2, 2) (testStack 1 [redItem]))
                 (emptyGameState (2, 2) testDungeon)
-        views = runViews state [Inspect, Pick]
+        views = runViews state [Inspect, Pick (ItemId 1)]
 
 testInput :: Test
 testInput =
     expectEqual
-        "input bindings and an unbound key"
+        "direct dungeon bindings exclude modal item commands"
         [ Just (PlayTurn (Move West))
         , Just (PlayTurn (Move South))
         , Just (PlayTurn (Move North))
         , Just (PlayTurn (Move East))
-        , Just (PlayTurn Pick)
-        , Just (PlayTurn Drop)
         , Just (PlayTurn Wait)
-        , Just Redraw
-        , Just ShowInventory
+        , Nothing
         , Just (PlayTurn Inspect)
         , Just Quit
         , Nothing
+        , Nothing
+        , Nothing
+        , Nothing
+        , Nothing
         ]
-        (map parseInput "hjklpd. i\nqz")
+        (map parseInput "hjkl. \nqpdLiz")
+
+testAttackConfirmation :: Test
+testAttackConfirmation = checks
+    [ expectEqual
+        "movement toward an NPC opens confirmation and logs its name"
+        ( [AttackConfirmation East, DungeonScreen]
+        , Just (LogMessage (attackConfirmationMessage Goblin))
+        )
+        prompted
+    , expectEqual
+        "lowercase y and Enter release the pending attack"
+        [ ([DungeonScreen], Just (PlayTurn (Move East)))
+        , ([DungeonScreen], Just (PlayTurn (Move East)))
+        ]
+        (map respond [CharKey 'y', CharKey '\n'])
+    , expectEqual
+        "every other key cancels the pending attack"
+        (replicate 5 ([DungeonScreen], Nothing))
+        (map respond
+            [ CharKey 'n'
+            , CharKey 'Y'
+            , CharKey 'q'
+            , OtherKey
+            , EscapeKey
+            ])
+    , expectEqual
+        "ordinary unoccupied movement bypasses confirmation"
+        ([DungeonScreen], Just (PlayTurn (Move West)))
+        (uiStep (CharKey 'h') view [DungeonScreen])
+    ]
+    where
+        playerPos = (2, 2)
+        view = toGameView []
+            $ setNpcs
+                (Map.singleton
+                    (NpcId 1)
+                    (initNpc (3, 2) Goblin Stationary emptyItemStack))
+            $ emptyGameState playerPos testDungeon
+        prompted = uiStep (CharKey 'l') view [DungeonScreen]
+        respond key = uiStep key view (fst prompted)
+
+testItemInteractionUI :: Test
+testItemInteractionUI = checks
+    [ expectEqual
+        "choice pages contain fifteen entries and restart labels"
+        (15, [('a', 16 :: Int)])
+        (choicePageSize, pageChoices 1 [1 .. 16])
+    , expectEqual
+        "inventory paging, selection, and nested Escape form one pure trace"
+        ( [InventoryScreen 0, DungeonScreen]
+        , [InventoryScreen 1, DungeonScreen]
+        , [InventoryScreen 0, DungeonScreen]
+        , [ItemScreen (ItemId 16), InventoryScreen 1, DungeonScreen]
+        , [InventoryScreen 1, DungeonScreen]
+        , [DungeonScreen]
+        )
+        ( inventory0
+        , inventory1
+        , inventoryWrapped
+        , detail
+        , backToPage
+        , backToDungeon
+        )
+    , expectEqual
+        "the second page renders the same selector association"
+        [ "Inventory (page 2/2)"
+        , "a) red gem"
+        , "b) short sword (one-handed melee weapon)"
+        , "Space: next page  Esc: back"
+        ]
+        (screenLines view $ InventoryScreen 1)
+    , expectEqual
+        "modal choice flows emit exact item identities"
+        [ Just (PlayTurn $ Drop (ItemId 1))
+        , Just (PlayTurn $ Pick (ItemId 20))
+        , Just (PlayTurn $ Loot (ItemId 21) (ItemId 30))
+        ]
+        [ commandFrom (DropScreen 0) 'a'
+        , commandFrom (PickupScreen 0) 'a'
+        , commandFrom (LootItemsScreen (ItemId 21) 0) 'a'
+        ]
+    , expectEqual
+        "Pickup reports none, submits one, and selects among several"
+        ( ([DungeonScreen], Just (LogMessage nothingToPickupMessage))
+        , ([DungeonScreen], Just (PlayTurn (Pick (ItemId 20))))
+        , [PickupScreen 0, DungeonScreen]
+        )
+        ( uiStep (CharKey 'p') emptyLootView root
+        , uiStep (CharKey 'p') singleItemView root
+        , fst (uiStep (CharKey 'p') view root)
+        )
+    , expectEqual
+        "Loot skips selection for one container and Escape returns to the dungeon"
+        ( [LootItemsScreen (ItemId 21) 0, DungeonScreen]
+        , [DungeonScreen]
+        )
+        (lootItems, lootBack)
+    , expectEqual
+        "Loot reports an empty source without opening a screen"
+        ( [DungeonScreen]
+        , Just (LogMessage nothingToLootMessage)
+        )
+        (uiStep (CharKey 'L') emptyLootView root)
+    , expectEqual
+        "Loot retains container selection when there are several choices"
+        [LootContainersScreen 0, DungeonScreen]
+        (fst $ uiStep (CharKey 'L') multipleContainersView root)
+    , expectEqual
+        "frontend notices persist without advancing the held game state"
+        ( [0, 0, 1, 1]
+        , [ []
+          , [nothingToLootMessage]
+          , [nothingToLootMessage]
+          , [nothingToLootMessage]
+          ]
+        )
+        (map vTurnNumber heldViews, map vMessages heldViews)
+    , expectEqual
+        "item details offer only valid actions"
+        ( Just (PlayTurn $ Drop (ItemId 1))
+        , Nothing
+        , Just (PlayTurn $ Wield (ItemId 40))
+        )
+        ( detailCommand (ItemId 1) 'd'
+        , detailCommand (ItemId 1) 'w'
+        , detailCommand (ItemId 40) 'w'
+        )
+    ]
+    where
+        pos = (2, 2)
+        inventory = itemStackFromList
+            $ [ (ItemId ident, redItem) | ident <- [1 .. 16] ]
+            ++ [(ItemId 40, WeaponItem shortSword)]
+        floorItems = Map.singleton pos
+            $ itemStackFromList
+                [ (ItemId 20, blueItem)
+                , (ItemId 21, chestItem $ testStack 30 [redItem])
+                ]
+        view = toGameView []
+            $ setInventory inventory
+            $ setFloor floorItems
+            $ emptyGameState pos testDungeon
+        root = [DungeonScreen]
+        inventory0 = fst $ uiStep (CharKey 'i') view root
+        inventory1 = fst $ uiStep (CharKey ' ') view inventory0
+        inventoryWrapped = fst $ uiStep (CharKey ' ') view inventory1
+        detail = fst $ uiStep (CharKey 'a') view inventory1
+        backToPage = fst $ uiStep EscapeKey view detail
+        backToDungeon = fst $ uiStep EscapeKey view backToPage
+        commandFrom mode key =
+            snd $ uiStep (CharKey key) view [mode, DungeonScreen]
+        detailCommand ident key = commandFrom (ItemScreen ident) key
+        lootItems = fst $ uiStep (CharKey 'L') view root
+        lootBack = fst $ uiStep EscapeKey view lootItems
+        emptyLootView = toGameView [] $ emptyGameState pos testDungeon
+        singleItemView = toGameView []
+            $ setFloor
+                (Map.singleton pos
+                    $ itemStackFromList [(ItemId 20, blueItem)])
+            $ emptyGameState pos testDungeon
+        multipleContainersView = toGameView []
+            $ setFloor
+                (Map.singleton pos
+                    $ itemStackFromList
+                        [ (ItemId 21, chestItem emptyItemStack)
+                        , (ItemId 22, corpseItem Goblin emptyItemStack)
+                        ])
+            $ emptyGameState pos testDungeon
+        heldViews = runIdentity $ embed
+            (Game.gameViewInput $ emptyGameState pos testDungeon)
+            [ (Nothing, [])
+            , (Nothing, [nothingToLootMessage])
+            , (Just Wait, [])
+            , (Nothing, [])
+            ]
+
+testWielding :: Test
+testWielding = checks
+    [ expectEqual
+        "wieldedState owns weapon replacement and Drop recurrence"
+        (Just [Just (ItemId 10), Just (ItemId 12), Nothing])
+        directStates
+    , expectEqual
+        "Wield validates weapons, replaces the slot, and Drop clears it"
+        ( [ Just (ItemId 10)
+          , Just (ItemId 10)
+          , Just (ItemId 12)
+          , Nothing
+          ]
+        , [1, 1, 2, 3]
+        )
+        ( map (plWielded . stPlayer) states
+        , map stTurnNumber states
+        )
+    , expectEqual
+        "dropping the wielded weapon moves that exact identity to the floor"
+        ([(ItemId 12, WeaponItem shortBow)], [ItemId 10, ItemId 11])
+        ( itemStackToList (itemsAt pos $ stFloorItems final)
+        , itemStackIds (inventoryOf final)
+        )
+    ]
+    where
+        pos = (2, 2)
+        inventory = itemStackFromList
+            [ (ItemId 10, WeaponItem shortSword)
+            , (ItemId 11, ringItem)
+            , (ItemId 12, WeaponItem shortBow)
+            ]
+        states = runScriptedGame
+            (setInventory inventory $ emptyGameState pos testDungeon)
+            [ Wield (ItemId 10)
+            , Wield (ItemId 11)
+            , Wield (ItemId 12)
+            , Drop (ItemId 12)
+            ]
+        final = last states
+        directStates = either (const Nothing) Just
+            $ runIdentity
+            $ runExceptT
+            $ embed
+                (wieldedState Nothing)
+                [ (Wield (ItemId 10), inventory)
+                , (Wield (ItemId 12), inventory)
+                , (Drop (ItemId 12), inventory)
+                ]
 
 testItemPresentation :: Test
 testItemPresentation = checks
@@ -1152,6 +1396,12 @@ testItemPresentation = checks
 testRendering :: Test
 testRendering = checks
     [ expectEqual
+        "terrain renders floor as dot and vacuum as space"
+        ('.', ' ')
+        ( gameViewCell (toGameView [] base) (1, 1)
+        , gameViewCell vacuumView (1, 1)
+        )
+    , expectEqual
         "NPCs render over floor stacks"
         'g'
         (gameViewCell npcView pos)
@@ -1159,10 +1409,29 @@ testRendering = checks
         "the first item in a floor stack is rendered"
         '%'
         (gameViewCell itemView pos)
+    , expectEqual
+        "the side panel shows vitals and character stats vertically"
+        [ "Player"
+        , "Position: (2,2)"
+        , "HP: 10"
+        , "MP: 10"
+        , "Hunger: 0"
+        , "Strength: 10"
+        , "Intelligence: 10"
+        , "Dexterity: 10"
+        , "Constitution: 10"
+        , "Items: 0"
+        ]
+        (playerStatsLines $ toGameView [] base)
     ]
     where
         pos = (2, 2)
         base = emptyGameState pos testDungeon
+        vacuumView = toGameView []
+            $ emptyGameState pos
+            $ layoutDungeon
+            $ compose 1.0
+            $ room (2, 2) (6, 6)
         itemState = setFloor
             (Map.singleton pos
                 (testStack 1 [redItem, chestItem emptyItemStack]))
@@ -1178,22 +1447,6 @@ testRendering = checks
                         Stationary
                         emptyItemStack))
                 itemState
-
-testInventoryLines :: Test
-testInventoryLines = checks
-    [ expectEqual
-        "inventory renders numbered item descriptions"
-        ["Inventory", "1. red gem", "2. ring of protection"]
-        (inventoryLines 4 (testStack 1 [redItem, ringItem]))
-    , expectEqual
-        "empty inventory has an explicit line"
-        ["Inventory", "(empty)"]
-        (inventoryLines 3 emptyItemStack)
-    , expectEqual
-        "inventory is clipped to viewport height"
-        ["Inventory", "1. red gem"]
-        (inventoryLines 2 (testStack 1 [redItem, ringItem]))
-    ]
 
 testMessageLogLines :: Test
 testMessageLogLines = checks
@@ -1289,7 +1542,7 @@ heavyArmourItem :: Item
 heavyArmourItem = ArmourItem plateMail
 
 testDungeon :: Dungeon
-testDungeon = listArray ((1, 1), (5, 5)) (repeat ' ')
+testDungeon = listArray ((1, 1), (5, 5)) (repeat '.')
 
 wideDungeon :: Dungeon
 wideDungeon = layoutDungeon $ compose 1.0 $ room (1, 1) (10, 4)
@@ -1298,16 +1551,16 @@ wallDungeon :: Dungeon
 wallDungeon =
     listArray
         ((1, 1), (3, 3))
-        [ ' ', ' ', ' '
-        , ' ', '#', ' '
-        , ' ', ' ', ' '
+        [ '.', '.', '.'
+        , '.', '#', '.'
+        , '.', '.', '.'
         ]
 
 wallAtThreeDungeon :: Dungeon
 wallAtThreeDungeon =
     listArray
         ((1, 1), (5, 5))
-        [ if pos == (3, 1) then '#' else ' '
+        [ if pos == (3, 1) then '#' else '.'
         | pos <- (range ((1, 1), (5, 5)) :: [Position])
         ]
 
@@ -1392,13 +1645,13 @@ runIdentityMSF :: MSF Identity a b -> a -> (b, MSF Identity a b)
 runIdentityMSF msf input = runIdentity (unMSF msf input)
 
 data ViewportConfig = ViewportConfig
-    { viewportScreenDims :: (Int, Int)
+    { viewportDims :: (Int, Int)
     , viewportPadding :: (Int, Int)
     }
 
 instance HasVty ViewportConfig where
     getVty _ = error "viewport tests do not use Vty"
-    getScreenDims = viewportScreenDims
+    getViewportDims = viewportDims
     getPadding = viewportPadding
 
 runViewport
@@ -1407,8 +1660,8 @@ runViewport
     -> (Int, Int)
     -> [(Int, Int)]
     -> [(Int, Int, Int, Int)]
-runViewport screenDims padding dungeonDims positions =
-    runReader (go viewport positions) (ViewportConfig screenDims padding)
+runViewport viewportDims' padding dungeonDims positions =
+    runReader (go viewport positions) (ViewportConfig viewportDims' padding)
     where
         go
             :: MSF

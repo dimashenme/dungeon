@@ -22,17 +22,27 @@ module Dungeon.GameData
     , indefiniteItemDescription
     , containerDescription
     , containerGlyph
+    , observe
+    , attackConfirmationMessage
+    , nothingToPickupMessage
+    , nothingToLootMessage
     , pickupMessage
+    , lootMessage
     , dropMessage
     , npcKilledMessage
     , defaultGameSettings
     ) where
 
 import Data.Char (toLower)
+import Data.List (intercalate)
 import Dungeon.Item
     ( Container(..)
     , ContainerKind(..)
+    , FloorItems
     , Item(..)
+    , itemStackItems
+    , itemStackSize
+    , itemsAt
     )
 import Dungeon.Map (Position)
 import Dungeon.Types
@@ -159,36 +169,85 @@ containerGlyph container =
         ChestContainer -> 'C'
         CorpseContainer _ -> ';'
 
+-- | Item descriptions produced when the player observes a dungeon position.
+observe :: Position -> FloorItems -> [String]
+observe pos floorItems =
+    map (atPosition pos . ("you see " ++)) descriptions
+    where
+        stack = itemStackItems (itemsAt pos floorItems)
+        gems = [gem | GemItem gem <- stack]
+        looseItems =
+            [ item
+            | item <- stack
+            , case item of
+                GemItem _ -> False
+                ContainerItem _ -> False
+                _ -> True
+            ]
+        containers = [container | ContainerItem container <- stack]
+        descriptions =
+            gemDescriptions
+            ++ map indefiniteItemDescription looseItems
+            ++ map containerObservation containers
+        gemDescriptions =
+            case gems of
+                [] -> []
+                _ ->
+                    [ countNoun (length gems) "gem"
+                    ++ " ("
+                    ++ intercalate ", " (map (gemColorName . gemColor) gems)
+                    ++ ")"
+                    ]
+
+        containerObservation container =
+            article
+            ++ " containing "
+            ++ countNoun (itemStackSize (containerItems container)) "item"
+            where
+                article =
+                    case containerKind container of
+                        ChestContainer -> "a chest"
+                        CorpseContainer _ ->
+                            "the " ++ itemDescription (ContainerItem container)
+
+        countNoun quantity noun =
+            show quantity
+            ++ " "
+            ++ noun
+            ++ if quantity == 1 then "" else "s"
+
+nothingToLootMessage :: String
+nothingToLootMessage = "nothing to loot"
+
+nothingToPickupMessage :: String
+nothingToPickupMessage = "nothing to pick up"
+
+attackConfirmationMessage :: NpcKind -> String
+attackConfirmationMessage kind =
+    "really attack " ++ npcName kind ++ "? (yes/no)"
+
 pickupMessage :: Position -> Item -> String
 pickupMessage pos item =
-    "picked up "
-        ++ indefiniteItemDescription item
-        ++ " at "
-        ++ show pos
+    atPosition pos ("picked up " ++ indefiniteItemDescription item)
 
-dropMessage :: Position -> Item -> Maybe Container -> String
-dropMessage pos item target =
-    "dropped "
+lootMessage :: Position -> Item -> Container -> String
+lootMessage pos item container =
+    atPosition pos
+        ("looted "
         ++ indefiniteItemDescription item
-        ++ destinationDescription target
-        ++ " at "
-        ++ show pos
-    where
-        destinationDescription destination =
-            case destination of
-                Just container ->
-                    case containerKind container of
-                        ChestContainer -> " into a chest"
-                        CorpseContainer _ ->
-                            " into the " ++ containerDescription container
-                Nothing -> ""
+        ++ " from the "
+        ++ containerDescription container)
+
+dropMessage :: Position -> Item -> String
+dropMessage pos item =
+    atPosition pos ("dropped " ++ indefiniteItemDescription item)
 
 npcKilledMessage :: Position -> NpcKind -> String
 npcKilledMessage pos kind =
-    "you kill the "
-        ++ npcName kind
-        ++ " at "
-        ++ show pos
+    atPosition pos ("you kill the " ++ npcName kind)
+
+atPosition :: Position -> String -> String
+atPosition pos message = message ++ " at " ++ show pos
 
 weaponTypeDescription :: WeaponType -> String
 weaponTypeDescription weaponType' =

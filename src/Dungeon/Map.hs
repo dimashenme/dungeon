@@ -9,6 +9,7 @@ module Dungeon.Map
     , digY
     , water
     , generateDungeon
+    , movePosition
     , isWalkable
     , isWater
     , buildDijkstra
@@ -35,10 +36,25 @@ import Data.Array.ST
     , writeArray
     )
 import Data.STRef (newSTRef, readSTRef, writeSTRef)
+import Dungeon.Types (Direction(..))
 
 type Position = (Int, Int)
 
 type Dungeon = Array Position Char
+
+floorTile, vacuumTile, wallTile, waterTile :: Char
+floorTile = '.'
+vacuumTile = ' '
+wallTile = '#'
+waterTile = '~'
+
+movePosition :: Direction -> Position -> Position
+movePosition direction (x, y) =
+    case direction of
+        West -> (x - 1, y)
+        East -> (x + 1, y)
+        North -> (x, y - 1)
+        South -> (x, y + 1)
 
 data TerrainCommand
     = Room Position Position
@@ -68,13 +84,13 @@ generateDungeon scale rawCommands = runSTArray $ do
     forM_ commands $ \command ->
         case command of
             Room (x1, y1) (x2, y2) -> do
-                forM_ [x1 .. x2] (\x -> writeArray ar (x, y1) '#')
-                forM_ [x1 .. x2] (\x -> writeArray ar (x, y2) '#')
-                forM_ [y1 .. y2] (\y -> writeArray ar (x1, y) '#')
-                forM_ [y1 .. y2] (\y -> writeArray ar (x2, y) '#')
+                forM_ [x1 .. x2] (\x -> writeArray ar (x, y1) wallTile)
+                forM_ [x1 .. x2] (\x -> writeArray ar (x, y2) wallTile)
+                forM_ [y1 .. y2] (\y -> writeArray ar (x1, y) wallTile)
+                forM_ [y1 .. y2] (\y -> writeArray ar (x2, y) wallTile)
                 forM_ [y1 + 1 .. y2 - 1] $ \y ->
                     forM_ [x1 + 1 .. x2 - 1] $ \x ->
-                        writeArray ar (x, y) ' '
+                        writeArray ar (x, y) floorTile
             Tunnel (x1, y1) (x2, y2)
                 | y1 == y2 ->
                     digTunnel mapBounds ar (x1, y1) (x2 - x1) id
@@ -87,13 +103,13 @@ generateDungeon scale rawCommands = runSTArray $ do
                         (\(x', y') -> (y', x'))
                 | otherwise -> pure ()
             Water pos ->
-                writeArray ar pos '~'
+                writeArray ar pos waterTile
     pure ar
     where
         commands = map (scaleCommand scale) rawCommands
         (maxX, maxY) = commandBounds commands
         mapBounds = ((1, 1), (maxX + 1, maxY + 1))
-        blankMap = listArray mapBounds (repeat '.')
+        blankMap = listArray mapBounds (repeat vacuumTile)
 
 scaleCommand :: Float -> TerrainCommand -> TerrainCommand
 scaleCommand scale command =
@@ -128,7 +144,7 @@ digTunnel
 digTunnel mapBounds ar (start, fixed) len toPosition = do
     forM_ [start .. start + len] $ \offset -> do
         let pos = toPosition (offset, fixed)
-        writeArray ar pos ' '
+        writeArray ar pos floorTile
         wallAround pos
     when (len > 0) $ do
         openRoom
@@ -150,10 +166,11 @@ digTunnel mapBounds ar (start, fixed) len toPosition = do
             forM_ (around pos) $ \neighbor ->
                 when (inRange mapBounds neighbor) $ do
                     tile <- readArray ar neighbor
-                    when (tile == '.') $ writeArray ar neighbor '#'
+                    when (tile == vacuumTile) $
+                        writeArray ar neighbor wallTile
         isFloor pos =
             if inRange mapBounds pos
-                then (== ' ') <$> readArray ar pos
+                then (== floorTile) <$> readArray ar pos
                 else pure False
         hasFloorNeighbor pos corridorPosition =
             or
@@ -165,25 +182,25 @@ digTunnel mapBounds ar (start, fixed) len toPosition = do
             unless connected $ do
                 doorwayWalls <- filterM (isDoorway pos) (cardinal pos)
                 forM_ doorwayWalls $ \wall -> do
-                    writeArray ar wall ' '
+                    writeArray ar wall floorTile
                     wallAround wall
         isDoorway endpoint wall =
             if not (inRange mapBounds wall)
                 then pure False
                 else do
                     tile <- readArray ar wall
-                    if tile /= '#'
+                    if tile /= wallTile
                         then pure False
                         else hasFloorNeighbor wall endpoint
 
 isWalkable :: Dungeon -> Position -> Bool
 isWalkable dungeon pos =
     inRange (bounds dungeon) pos
-        && dungeon ! pos `elem` [' ', '~']
+        && dungeon ! pos `elem` [floorTile, waterTile]
 
 isWater :: Dungeon -> Position -> Bool
 isWater dungeon pos =
-    inRange (bounds dungeon) pos && dungeon ! pos == '~'
+    inRange (bounds dungeon) pos && dungeon ! pos == waterTile
 
 type DijkstraGrid = Array (Int, Int) Int
 
