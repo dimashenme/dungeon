@@ -1,154 +1,189 @@
 {-# LANGUAGE FlexibleContexts #-}
-module Dungeon.Map (
-    Dungeon,
-    DungeonM,
-    room,
-    digX,
-    digY,
-    compose,
-    isWalkable,
-    buildDijkstra
-) where
 
-import Control.Monad
-import Control.Monad.ST
-import Control.Monad.Writer
+module Dungeon.Map
+    ( Position
+    , Dungeon
+    , TerrainCommand
+    , room
+    , digX
+    , digY
+    , water
+    , generateDungeon
+    , isWalkable
+    , isWater
+    , buildDijkstra
+    ) where
+
+import Control.Monad (filterM, forM, forM_, unless, when)
+import Control.Monad.ST (ST, runST)
 import Data.Array
+    ( Array
+    , bounds
+    , indices
+    , inRange
+    , listArray
+    , (!)
+    )
 import Data.Array.ST
-import Data.STRef
-import Graphics.Vty
-import Data.Default (def)
+    ( MArray
+    , STArray
+    , freeze
+    , newArray
+    , readArray
+    , runSTArray
+    , thaw
+    , writeArray
+    )
+import Data.STRef (newSTRef, readSTRef, writeSTRef)
 
--- | Map of a dungeon 
-type Dungeon = Array (Int,Int) Char
+type Position = (Int, Int)
 
--- | Whether a position can be occupied by a walking entity.
+type Dungeon = Array Position Char
+
+data TerrainCommand
+    = Room Position Position
+    | Tunnel Position Position
+    | Water Position
+
+room :: Position -> Position -> TerrainCommand
+room = Room
+
+digX :: Position -> Int -> TerrainCommand
+digX pos@(x, y) len = Tunnel pos (x + len, y)
+
+digY :: Position -> Int -> TerrainCommand
+digY pos@(x, y) len = Tunnel pos (x, y + len)
+
+water :: Position -> TerrainCommand
+water = Water
+
+-- | Generate terrain at the requested coordinate scale.
 --
--- A carved floor is represented by a space.  Walls, undug terrain, and
--- positions outside the dungeon are not walkable.
-isWalkable :: Dungeon -> (Int, Int) -> Bool
-isWalkable dungeon position =
-    inRange (bounds dungeon) position && dungeon ! position == ' '
+-- Room and tunnel endpoints are rounded after scaling. Tunnel lengths are
+-- derived from the rounded endpoints, keeping doors aligned with rooms at
+-- non-integer scales.
+generateDungeon :: Float -> [TerrainCommand] -> Dungeon
+generateDungeon scale rawCommands = runSTArray $ do
+    ar <- thaw blankMap
+    forM_ commands $ \command ->
+        case command of
+            Room (x1, y1) (x2, y2) -> do
+                forM_ [x1 .. x2] (\x -> writeArray ar (x, y1) '#')
+                forM_ [x1 .. x2] (\x -> writeArray ar (x, y2) '#')
+                forM_ [y1 .. y2] (\y -> writeArray ar (x1, y) '#')
+                forM_ [y1 .. y2] (\y -> writeArray ar (x2, y) '#')
+                forM_ [y1 + 1 .. y2 - 1] $ \y ->
+                    forM_ [x1 + 1 .. x2 - 1] $ \x ->
+                        writeArray ar (x, y) ' '
+            Tunnel (x1, y1) (x2, y2)
+                | y1 == y2 ->
+                    digTunnel mapBounds ar (x1, y1) (x2 - x1) id
+                | x1 == x2 ->
+                    digTunnel
+                        mapBounds
+                        ar
+                        (y1, x1)
+                        (y2 - y1)
+                        (\(x', y') -> (y', x'))
+                | otherwise -> pure ()
+            Water pos ->
+                writeArray ar pos '~'
+    pure ar
+    where
+        commands = map (scaleCommand scale) rawCommands
+        (maxX, maxY) = commandBounds commands
+        mapBounds = ((1, 1), (maxX + 1, maxY + 1))
+        blankMap = listArray mapBounds (repeat '.')
 
--------------------------------------------------------------------------------
--- DungeonM 
--------------------------------------------------------------------------------
+scaleCommand :: Float -> TerrainCommand -> TerrainCommand
+scaleCommand scale command =
+    case command of
+        Room pos1 pos2 -> Room (scalePosition pos1) (scalePosition pos2)
+        Tunnel pos1 pos2 -> Tunnel (scalePosition pos1) (scalePosition pos2)
+        Water pos -> Water (scalePosition pos)
+    where
+        scalePosition (x, y) = (scaleCoordinate x, scaleCoordinate y)
+        scaleCoordinate n = round (scale * fromIntegral n)
 
-data Command 
-    = Room (Int, Int) (Int, Int) 
-    | DigX (Int, Int) Int 
-    | DigY (Int, Int) Int
+commandBounds :: [TerrainCommand] -> Position
+commandBounds =
+    foldl include (1, 1)
+    where
+        include (maxX, maxY) command =
+            case command of
+                Room (x1, y1) (x2, y2) ->
+                    (maximum [maxX, x1, x2], maximum [maxY, y1, y2])
+                Tunnel (x1, y1) (x2, y2) ->
+                    (maximum [maxX, x1, x2], maximum [maxY, y1, y2])
+                Water _ -> (maxX, maxY)
 
--- | Monad to describe a dungeon
-type DungeonM = Writer [Command]
-
-room :: (Int, Int) -> (Int, Int) -> DungeonM ()
-room p1 p2 = tell [Room p1 p2]
-
--- | Dig an inclusive horizontal corridor.  If either endpoint meets a room
--- only at a corner, compose widens the endpoint into a traversable doorway.
-digX :: (Int, Int) -> Int -> DungeonM ()
-digX p l = tell [DigX p l]
-
--- | Dig an inclusive vertical corridor.  If either endpoint meets a room only
--- at a corner, compose widens the endpoint into a traversable doorway.
-digY :: (Int, Int) -> Int -> DungeonM ()
-digY p l = tell [DigY p l]
-
--- | Make a map from the description at the requested coordinate scale.
---
--- Every room and tunnel endpoint is rounded to the nearest integer after
--- scaling.  Tunnel lengths are derived from their rounded endpoints, keeping
--- doors aligned with the rooms they connect at non-integer scales.
-compose :: Float -> DungeonM () -> Dungeon
-compose scale dung =
-  let
-    cmds = map scaleCommand (execWriter dung)
-    scaleCoordinate n = round (scale * fromIntegral n)
-    scalePoint (x, y) = (scaleCoordinate x, scaleCoordinate y)
-    scaleCommand command = case command of
-      Room p1 p2 -> Room (scalePoint p1) (scalePoint p2)
-      DigX (x, y) len ->
-        let x' = scaleCoordinate x
-            endX' = scaleCoordinate (x + len)
-        in DigX (x', scaleCoordinate y) (endX' - x')
-      DigY (x, y) len ->
-        let y' = scaleCoordinate y
-            endY' = scaleCoordinate (y + len)
-        in DigY (scaleCoordinate x, y') (endY' - y')
-    -- Calculate bounds from the description
-    (maxW, maxH) = foldl (
-      \(mx, my) cmd -> case cmd of
-        Room (x1,y1) (x2,y2) -> (maximum [mx, x1, x2], maximum [my, y1, y2])
-        DigX (x,y) l         -> (max mx (x+l), max my y)
-        DigY (x,y) l         -> (max mx x,     max my (y+l))
-      ) (1, 1) cmds
-    
-    -- Create blank map
-    bnds = ((1,1),(maxW + 1, maxH + 1))
-    digTunnel :: (MArray a Char m ) => a (Int, Int) Char -> (Int, Int) -> Int -> ((Int, Int) -> (Int, Int)) -> m ()
-    digTunnel a (p0, s0) len f = do
-      let cardinalNeighbors (x, y) = [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
-          surroundingCoordinates (x, y) =
+digTunnel
+    :: MArray array Char m
+    => (Position, Position)
+    -> array Position Char
+    -> (Int, Int)
+    -> Int
+    -> ((Int, Int) -> Position)
+    -> m ()
+digTunnel mapBounds ar (start, fixed) len toPosition = do
+    forM_ [start .. start + len] $ \offset -> do
+        let pos = toPosition (offset, fixed)
+        writeArray ar pos ' '
+        wallAround pos
+    when (len > 0) $ do
+        openRoom
+            (toPosition (start, fixed))
+            (toPosition (start + 1, fixed))
+        openRoom
+            (toPosition (start + len, fixed))
+            (toPosition (start + len - 1, fixed))
+    where
+        cardinal (x, y) =
+            [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+        around (x, y) =
             [ (x + dx, y + dy)
             | dx <- [-1 .. 1]
             , dy <- [-1 .. 1]
             , (dx, dy) /= (0, 0)
             ]
-          wallSurroundings position =
-            forM_ (surroundingCoordinates position) $ \neighbor -> do
-              when (inRange bnds neighbor) $ do
-                val <- readArray a neighbor
-                when (val == '.') $ writeArray a neighbor '#'
-          isFloor position =
-            if inRange bnds position
-              then (== ' ') <$> readArray a position
-              else return False
-          hasFloorNeighbor position corridorNeighbor =
-            or <$> forM (filter (/= corridorNeighbor) (cardinalNeighbors position)) isFloor
-          opensRoom position corridorNeighbor = do
-            connected <- hasFloorNeighbor position corridorNeighbor
+        wallAround pos =
+            forM_ (around pos) $ \neighbor ->
+                when (inRange mapBounds neighbor) $ do
+                    tile <- readArray ar neighbor
+                    when (tile == '.') $ writeArray ar neighbor '#'
+        isFloor pos =
+            if inRange mapBounds pos
+                then (== ' ') <$> readArray ar pos
+                else pure False
+        hasFloorNeighbor pos corridorPosition =
+            or
+                <$> forM
+                    (filter (/= corridorPosition) (cardinal pos))
+                    isFloor
+        openRoom pos corridorPosition = do
+            connected <- hasFloorNeighbor pos corridorPosition
             unless connected $ do
-              doorwayWalls <- filterM (isDoorway position) (cardinalNeighbors position)
-              forM_ doorwayWalls $ \wall -> do
-                writeArray a wall ' '
-                wallSurroundings wall
-          isDoorway endpoint wall =
-            if not (inRange bnds wall)
-              then return False
-              else do
-                tile <- readArray a wall
-                if tile /= '#'
-                  then return False
-                  else hasFloorNeighbor wall endpoint
-      forM_ [p0 .. p0 + len] $ \p -> do
-        let crd = f (p, s0) 
-        writeArray a crd ' '
-        wallSurroundings crd
-      when (len > 0) $ do
-        opensRoom (f (p0, s0)) (f (p0 + 1, s0))
-        opensRoom (f (p0 + len, s0)) (f (p0 + len - 1, s0))
-    blankMap = listArray bnds (repeat '.')
-  in runSTArray $ do
-    ar <- thaw $ blankMap :: ST s (STArray s (Int, Int) Char)
-    forM_ cmds $ \cmd -> case cmd of
-        Room (x1, y1) (x2, y2) -> do
-            forM_ [x1..x2] (\x -> writeArray ar (x, y1) '#')
-            forM_ [x1..x2] (\x -> writeArray ar (x, y2) '#')
-            forM_ [y1..y2] (\y -> writeArray ar (x1, y) '#')
-            forM_ [y1..y2] (\y -> writeArray ar (x2, y) '#')
-            forM_ [y1+1..y2-1] (\y -> 
-                forM_ [x1+1..x2-1] (\x -> writeArray ar (x, y) ' '))
+                doorwayWalls <- filterM (isDoorway pos) (cardinal pos)
+                forM_ doorwayWalls $ \wall -> do
+                    writeArray ar wall ' '
+                    wallAround wall
+        isDoorway endpoint wall =
+            if not (inRange mapBounds wall)
+                then pure False
+                else do
+                    tile <- readArray ar wall
+                    if tile /= '#'
+                        then pure False
+                        else hasFloorNeighbor wall endpoint
 
-        DigX (x0, y0) len -> digTunnel ar (x0,y0) len id
+isWalkable :: Dungeon -> Position -> Bool
+isWalkable dungeon pos =
+    inRange (bounds dungeon) pos
+        && dungeon ! pos `elem` [' ', '~']
 
-        DigY (x0, y0) len -> digTunnel ar (y0,x0) len  (\(x,y) -> (y,x))
-    return ar
-   
-
--------------------------------------------------------------------------------
--- build Dijkstra map for a given list of goals
--------------------------------------------------------------------------------
+isWater :: Dungeon -> Position -> Bool
+isWater dungeon pos =
+    inRange (bounds dungeon) pos && dungeon ! pos == '~'
 
 type DijkstraGrid = Array (Int, Int) Int
 
@@ -156,9 +191,9 @@ buildDijkstra :: [(Int, Int)] -> Dungeon -> DijkstraGrid
 buildDijkstra goals level = runST $ do
     let bnds = bounds level
     dist <- newArray bnds 999 :: ST s (STArray s (Int, Int) Int)
-    
+
     forM_ goals $ \pos -> writeArray dist pos 0
-    
+
     let loop = do
             changed <- newSTRef False
             forM_ (indices level) $ \curr@(y, x) -> do

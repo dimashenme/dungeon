@@ -1,93 +1,396 @@
 {-# LANGUAGE Arrows #-}
 {-# LANGUAGE FlexibleContexts #-}
+
 module Dungeon.Logic
-  ( GameView(..)
-  , GameState(..)
-  , gameView
-  , Turn(..)
-  , Direction(..)
-  , HasInitState(..)
-  , playerPos
-  , runScriptedGame
-  ) where
+    ( Position
+    , Direction(..)
+    , Turn(..)
+    , FightMode(..)
+    , WetStatus(..)
+    , TurnTick(..)
+    , Player(..)
+    , RandomSeed(..)
+    , GameSettings(..)
+    , defaultGameSettings
+    , GameRuntimeState(..)
+    , GameT
+    , GameState(..)
+    , GameView(..)
+    , isWalkable
+    , isWater
+    , currentTileWet
+    , initPlayer
+    , initGameState
+    , fightMode
+    , turnNumber
+    , wetStatusState
+    , wetStatusMessages
+    , playerState
+    , gameState
+    , toGameView
+    ) where
 
-import Control.Monad.Reader
-import Data.MonadicStreamFunction
-import Data.MonadicStreamFunction.InternalCore (MSF(..))
-import Dungeon.Map
+import Prelude hiding (init)
+import Control.Applicative ((<|>))
+import Control.Monad (when)
+import Control.Monad.Fix (MonadFix)
+import Control.Monad.Reader.Class (MonadReader, asks)
+import Control.Monad.State.Class (MonadState, get)
+import qualified Control.Monad.State.Class as State
+import Control.Monad.State.Strict (runState)
+import Control.Monad.Trans.Except (ExceptT, throwE)
+import Control.Monad.Trans.MSF.Except
+    ( performOnFirstSample
+    , throwOn
+    )
+import Control.Monad.Trans.MSF.Maybe (exceptToMaybeS)
+import Control.Monad.Trans.RWS.Strict (RWST)
+import Control.Monad.Writer.Class (MonadWriter, tell)
+import Data.Bool (bool)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust)
+import Data.MonadicStreamFunction hiding (count, next)
+import qualified Data.MonadicStreamFunction as MSF
+import qualified Data.Set as Set
+import Data.Set (Set)
 import Dungeon.Combinators
+    ( countdownFrom
+    , restartOn
+    , runMaybeStateS
+    , sampleAndHold
+    )
+import Dungeon.DungeonLayout (DungeonLayout(..))
+import Dungeon.GameData
+    ( defaultGameSettings
+    , initialPlayerAttributes
+    )
+import Dungeon.Item
+import Dungeon.ItemState
+import Dungeon.Map (Dungeon, Position, isWalkable, isWater)
+import Dungeon.Npc
+import Dungeon.Random (RandomSeed(..), selectRandomSubset)
+import Dungeon.Types
+    ( CharAttributes
+    , Direction(..)
+    , GameSettings(..)
+    , Turn(..)
+    , TurnHoldUp(..)
+    )
 
-data Direction = North | South | West | East deriving (Show, Eq)
-data Turn = Move Direction deriving (Show, Eq)
+data FightMode
+    = Exploring
+    | Fighting (Set NpcId)
+    deriving (Show, Eq)
+
+data WetStatus = Dry | Wet
+    deriving (Show, Eq)
+
+data Player = Player
+    { plPos :: Position
+    , plAttributes :: CharAttributes
+    , plInventory :: Inventory
+    , plWetStatus :: WetStatus
+    , plWetCountdown :: Int
+    , plFightMode :: FightMode
+    }
+    deriving (Show, Eq)
+
+data GameRuntimeState = GameRuntimeState
+    { rtRandomSeed :: RandomSeed
+    , rtNextItemId :: ItemId
+    }
+    deriving (Show, Eq)
+
+type GameT m = RWST GameSettings [String] GameRuntimeState m
+
+initPlayer :: Position -> Player
+initPlayer pos =
+    Player
+        { plPos = pos
+        , plAttributes = initialPlayerAttributes
+        , plInventory = emptyItemStack
+        , plWetStatus = Dry
+        , plWetCountdown = 0
+        , plFightMode = Exploring
+        }
+
+nextPos
+    :: MonadWriter [String] m
+    => MSF (ExceptT TurnHoldUp m) (Turn, Dungeon, Position) Position
+nextPos = arrM $ \(turn, dungeon, pos@(x, y)) ->
+    case turn of
+        Move dir ->
+            let attempted =
+                    case dir of
+                        West -> (x - 1, y)
+                        East -> (x + 1, y)
+                        North -> (x, y - 1)
+                        South -> (x, y + 1)
+            in if isWalkable dungeon attempted
+                then pure attempted
+                else do
+                    tell ["*bump*"]
+                    throwE TurnHoldUp
+        _ -> pure pos
+
+fightMode
+    :: MonadReader GameSettings m
+    => FightMode
+    -> MSF m (Position, NpcPopulation) FightMode
+fightMode initMode =
+    performOnFirstSample $ do
+        enter <- asks gsFightEnterDistance
+        leave <- asks gsFightLeaveDistance
+        pure (mealy (step enter leave) (participants initMode))
+    where
+        step enter leave (position, npcs) current =
+            let next =
+                    Map.foldlWithKey'
+                        (include enter leave position current)
+                        Set.empty
+                        npcs
+                mode
+                    | Set.null next = Exploring
+                    | otherwise = Fighting next
+            in (mode, next)
+
+        participants mode =
+            case mode of
+                Exploring -> Set.empty
+                Fighting npcs -> npcs
+
+        include enter leave position current included ident npc
+            | distance position (npcPosition npc) <= enter =
+                Set.insert ident included
+            | ident `Set.member` current
+                && distance position (npcPosition npc) <= leave =
+                    Set.insert ident included
+            | otherwise = included
+
+        distance (x1, y1) (x2, y2) =
+            abs (x1 - x2) + abs (y1 - y2)
+
+data TurnTick = TurnTick
+    deriving (Show, Eq)
+
+currentTileWet :: Monad m => MSF m (Dungeon, Position) WetStatus
+currentTileWet = arr (bool Dry Wet . uncurry isWater)
+
+turnNumber :: Monad m => Int -> MSF m (Maybe TurnTick) Int
+turnNumber init =
+    sampleAndHold init (MSF.count >>> arr (+ init))
+
+wetStatusState
+    :: MonadReader GameSettings m
+    => WetStatus
+    -> Int
+    -> MSF m (WetStatus, Maybe TurnTick) (WetStatus, Int)
+wetStatusState initStatus initCount =
+    performOnFirstSample $ do
+        duration <- asks gsWetDurationTurns
+        pure
+            $ arr (\(tileStatus, tickEvt) -> tileStatus <$ tickEvt)
+            >>> sampleAndHold
+                (initStatus, max 0 initCount)
+                ( arr (const () &&& (== Wet))
+                    >>> restartOn
+                        (countdownFrom $ max 0 initCount - 1)
+                        (countdownFrom duration)
+                    >>> (arr (bool Dry Wet . (> 0)) &&& arr id)
+                )
+
+wetStatusMessages
+    :: MonadWriter [String] m
+    => WetStatus
+    -> MSF m WetStatus ()
+wetStatusMessages init =
+    feedback init (arrM step)
+    where
+        step (status', status) = do
+            when (status == Dry && status' == Wet) $
+                tell ["you are wet"]
+            when (status == Wet && status' == Dry) $
+                tell ["you are dry"]
+            pure ((), status')
+
+playerState
+    :: ( MonadReader GameSettings m
+       , MonadWriter [String] m
+       )
+    => Player
+    -> MSF
+         m
+         (Dungeon, Player, Maybe TurnTick)
+         Player
+playerState init = proc (dungeon, player, tickEvt) -> do
+    tileStatus <- currentTileWet -< (dungeon, plPos player)
+    (wet, count) <-
+        wetStatusState
+            (plWetStatus init)
+            (plWetCountdown init)
+            -< (tileStatus, tickEvt)
+    _ <- wetStatusMessages (plWetStatus init) -< wet
+    returnA -<
+        player
+            { plWetStatus = wet
+            , plWetCountdown = count
+            }
 
 data GameState = GameState
-  {
-    stPlayerPos :: (Int, Int)
-  , stDungeon   :: Dungeon
-  }
-class GameView a where
-    getPlayerPos :: a -> (Int, Int)
-    getDungeon   :: a -> Dungeon
+    { stPlayer :: Player
+    , stDungeon :: Dungeon
+    , stFloorItems :: FloorItems
+    , stNpcs :: NpcPopulation
+    , stTurnNumber :: Int
+    , stRandomSeed :: RandomSeed
+    , stNextItemId :: ItemId
+    }
+    deriving (Show, Eq)
 
-instance GameView GameState where
-    getPlayerPos = stPlayerPos
-    getDungeon = stDungeon
-  
--- the game logic MSFs below treat the GameState stored in the Reader
--- monad as the initial state of the current run of the game
+data GameView = GameView
+    { vPlayer :: Player
+    , vDungeon :: Dungeon
+    , vFloorItems :: FloorItems
+    , vNpcs :: NpcPopulation
+    , vTurnNumber :: Int
+    , vMessages :: [String]
+    }
+    deriving (Show, Eq)
 
-class HasInitState r where
-  initPlayerPos :: r -> (Int, Int)
-  initDungeon   :: r -> Dungeon
+initGameState :: Player -> DungeonLayout -> RandomSeed -> GameState
+initGameState player layout seed =
+    GameState
+        { stPlayer = player
+        , stDungeon = layoutDungeon layout
+        , stFloorItems = layoutItems layout
+        , stNpcs = layoutNpcs layout
+        , stTurnNumber = 0
+        , stRandomSeed = seed
+        , stNextItemId = layoutNextItemId layout
+        }
 
-instance HasInitState GameState where
-    initPlayerPos = stPlayerPos
-    initDungeon = stDungeon
+gameState
+    :: ( MonadFix m
+       , MonadReader GameSettings m
+       , MonadWriter [String] m
+       , MonadState GameRuntimeState m
+       )
+    => GameState
+    -> MSF m Turn GameState
+gameState init = proc turn -> do
+    attempted <-
+        runMaybeStateS
+            (exceptToMaybeS $ gameStateAttempt init)
+            -< turn
+    let tickEvt = TurnTick <$ attempted
+    currentTurn <- turnNumber (stTurnNumber init) -< tickEvt
+    state <- sampleAndHold init (arr id) -< attempted
+    player <-
+        playerState initPlayerState
+            -< (stDungeon state, stPlayer state, tickEvt)
+    returnA -<
+        state
+            { stPlayer = player
+            , stTurnNumber = currentTurn
+            }
+    where
+        initPlayerState = stPlayer init
 
-playerPos :: (MonadReader r m, HasInitState r)
-          => MSF m (Dungeon, Turn) (Int, Int)
-playerPos = proc input -> do
-    ip <- asksS initPlayerPos -< ()
-    returnA <<< (accumulateS updatePosA) -< (input, ip)
-      where
-        updatePosA = arr $ uncurry $ uncurry updatePos
-        updatePos :: Dungeon -> Turn -> (Int, Int) -> (Int, Int)
-        updatePos dung (Move dir) currentPos@(px,py) =
-          let candidate = case dir of
-                             West  -> (px-1, py)
-                             East  -> (px+1, py)
-                             North -> (px, py-1)
-                             South -> (px, py+1)
-          in if isWalkable dung candidate then candidate else currentPos
+gameStateAttempt
+    :: ( MonadFix m
+       , MonadReader GameSettings m
+       , MonadWriter [String] m
+       , MonadState GameRuntimeState m
+       )
+    => GameState
+    -> MSF (ExceptT TurnHoldUp m) Turn GameState
+gameStateAttempt init = proc turn -> do
+    rec
+        pos <- iPre (plPos initPlayerState) -< pos'
+        npcs <- iPre (stNpcs init) -< npcs'
+        floorItems <- iPre (stFloorItems init) -< floorItems'
+        inventory <- iPre initInventory -< inventory'
 
-dungeon :: (MonadReader r m, HasInitState r)
-        => MSF m Turn Dungeon
-dungeon = asksS initDungeon -- for now, may get dynamic dungeon
+        _ <- throwOn TurnHoldUp -< turn == Inspect
+        pos_ <- nextPos -< (turn, stDungeon init, pos)
+        killedEvt <- npcKilledEvts -< (pos_, npcs)
+        pickupEvt <- pickupEvts -< (turn, pos, floorItems)
+        dropEvt <- dropEvts -< (turn, pos, inventory)
 
-gameState :: (MonadReader r m, HasInitState r)
-          => MSF m Turn GameState
-gameState = proc turn -> do
-    dung <- dungeon -< turn
-    pos <- playerPos -< (dung, turn)
+        pos' <-
+            if isJust killedEvt
+                then returnA -< pos
+                else returnA -< pos_
 
-    returnA -< GameState{ stPlayerPos = pos
-                        , stDungeon = dung}
+        floorRemoveEvt <- floorEvtsFromPickup -< pickupEvt
+        inventoryAddEvt <- inventoryEvtsFromPickup -< pickupEvt
+        let dropEvtWithFloor =
+                fmap (\evt -> (evt, floorItems)) dropEvt
+        floorPlaceEvt <- floorEvtsFromDrop -< dropEvtWithFloor
+        inventoryRemoveEvt <- inventoryEvtsFromDrop -< dropEvt
+        corpsePlaceEvt <-
+            floorEvtsFromKill freshItemId selectLoot -< killedEvt
+        let floorEvt = floorRemoveEvt <|> floorPlaceEvt <|> corpsePlaceEvt
+        let inventoryEvt = inventoryAddEvt <|> inventoryRemoveEvt
+        floorItems' <-
+            floorItemsState (stFloorItems init) -< floorEvt
+        inventory' <-
+            inventoryState initInventory -< inventoryEvt
 
-gameView :: (MonadReader r m, HasInitState r)
-         => MSF m Turn GameState
-gameView = gameState
+        npcs' <-
+            npcsState (stDungeon init) (stNpcs init)
+                -< ( pos'
+                   , killedEvt
+                   )
 
--- | Run the game-logic MSF with predetermined gameplay turns.
---
--- Each output is the view after its corresponding turn has been applied.
-runScriptedGame :: GameState -> [Turn] -> [GameState]
-runScriptedGame initialState turns =
-  runReader (go gameView turns) initialState
-  where
-    go :: MSF (Reader GameState) Turn GameState
-       -> [Turn]
-       -> Reader GameState [GameState]
-    go _ [] = pure []
-    go msf (turn : rest) = do
-      (view, nextMsf) <- unMSF msf turn
-      (view :) <$> go nextMsf rest
+        fight <-
+            fightMode (plFightMode initPlayerState) -< (pos', npcs')
+        runtime <- arrM (const get) -< fight
+        let player =
+                initPlayerState
+                    { plPos = pos'
+                    , plInventory = inventory'
+                    , plFightMode = fight
+                    }
+
+    returnA -<
+        GameState
+            { stPlayer = player
+            , stDungeon = stDungeon init
+            , stFloorItems = floorItems'
+            , stNpcs = npcs'
+            , stTurnNumber = stTurnNumber init
+            , stRandomSeed = rtRandomSeed runtime
+            , stNextItemId = rtNextItemId runtime
+            }
+    where
+        initPlayerState = stPlayer init
+        initInventory = plInventory initPlayerState
+
+freshItemId :: MonadState GameRuntimeState m => m ItemId
+freshItemId = State.state $ \runtime ->
+    let ident@(ItemId next) = rtNextItemId runtime
+    in ( ident
+       , runtime { rtNextItemId = ItemId (next + 1) }
+       )
+
+selectLoot :: MonadState GameRuntimeState m => Inventory -> m Inventory
+selectLoot inventory = State.state $ \runtime ->
+    let (loot, nextSeed) =
+            runState
+                (selectRandomSubset (itemStackToList inventory))
+                (rtRandomSeed runtime)
+    in ( itemStackFromList loot
+       , runtime { rtRandomSeed = nextSeed }
+       )
+
+toGameView :: [String] -> GameState -> GameView
+toGameView msgs state =
+    GameView
+        { vPlayer = stPlayer state
+        , vDungeon = stDungeon state
+        , vFloorItems = stFloorItems state
+        , vNpcs = stNpcs state
+        , vTurnNumber = stTurnNumber state
+        , vMessages = msgs
+        }
