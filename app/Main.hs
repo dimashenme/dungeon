@@ -1,5 +1,5 @@
-import Dungeon.Game
+import Dungeon.Game (runApplication)
+import System.Environment (getArgs)
 
 main :: IO ()
-main = do
-  Dungeon.Game.runGame
+main = getArgs >>= runApplication

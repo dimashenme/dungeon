@@ -9,6 +9,7 @@ module Dungeon.Npc
     , NpcBehaviourState(..)
     , Npc(..)
     , NpcPopulation
+    , NpcDecision
     , NpcKilledEvt(..)
     , npcAt
     , initNpc
@@ -16,6 +17,7 @@ module Dungeon.Npc
     , npcKilledEvts
     , floorEvtsFromKill
     , npcsState
+    , npcsStateWithDecisions
     ) where
 
 import Prelude hiding (foldl', init)
@@ -163,19 +165,42 @@ npcsState
          )
          NpcPopulation
 npcsState dungeon init =
-    feedback init $ proc ((playerPos, killedEvt), population) -> do
+    arr (\(playerPos, killedEvt) -> (playerPos, killedEvt, Map.empty))
+        >>> npcsStateWithDecisions dungeon init
+
+npcsStateWithDecisions
+    :: Monad m
+    => Dungeon
+    -> NpcPopulation
+    -> MSF
+         m
+         ( Position
+         , Maybe NpcKilledEvt
+         , Map NpcId NpcDecision
+         )
+         NpcPopulation
+npcsStateWithDecisions dungeon init =
+    feedback init $ proc ((playerPos, killedEvt, external), population) -> do
         let survivors =
                 maybe population
                     (\evt -> Map.delete (killedNpcId evt) population)
                     killedEvt
-        decisions <- npcDecisions -< survivors
-        let decisions' =
+        let internalNpcs =
+                survivors `Map.withoutKeys` Map.keysSet external
+        internal <- npcDecisions -< internalNpcs
+        let internal' =
                 Map.intersectionWith
                     (\npc (decision, state) ->
                         (npc { npcBehaviourState = state }, decision))
                     survivors
-                    decisions
-            population' = resolveNpcDecisions dungeon playerPos decisions'
+                    internal
+            external' =
+                Map.intersectionWith (,) survivors external
+            population' =
+                resolveNpcDecisions
+                    dungeon
+                    playerPos
+                    (external' `Map.union` internal')
         returnA -< (population', population')
 
 npcDecisions

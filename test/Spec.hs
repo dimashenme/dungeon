@@ -8,7 +8,7 @@ import Control.Monad.State.Strict (State, get, modify, runState)
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 import Control.Monad.Trans.MSF.Maybe (exceptToMaybeS)
 import Control.Monad.Writer.Strict (runWriter)
-import Data.Array (bounds, listArray, range, (!))
+import Data.Array (bounds, listArray, range, (!), (//))
 import Data.Functor.Identity (Identity, runIdentity)
 import qualified Data.Map.Strict as Map
 import Data.List (isSubsequenceOf, sort)
@@ -31,6 +31,7 @@ import Dungeon.Combinators
     , runMaybeStateS
     , sampleAndHold
     )
+import Dungeon.Console
 import Dungeon.DungeonLayout
 import qualified Dungeon.Game as Game
 import Dungeon.GameData
@@ -56,14 +57,36 @@ import Dungeon.Npc
 import Dungeon.Random (drawBool, selectRandomSubset)
 import Dungeon.TestLayout1 (testLayout, testStartPos)
 import Dungeon.Types
-import System.Exit (exitFailure)
+import System.Environment (getArgs, getExecutablePath)
+import System.Exit (ExitCode(..), exitFailure)
+import System.IO (hFlush, hGetLine, hIsEOF, stdin, stdout)
+import System.Process
+    ( CreateProcess(..)
+    , StdStream(..)
+    , proc
+    , readCreateProcessWithExitCode
+    , withCreateProcess
+    )
+import System.Timeout (timeout)
 
 type Test = [String]
 
 main :: IO ()
 main = do
+    args <- getArgs
+    case args of
+        ["--patrol-agent-fixture"] -> patrolAgentFixture
+        ["--quitting-agent-fixture"] -> quittingAgentFixture
+        _ -> runTests
+
+runTests :: IO ()
+runTests = do
+    consoleFailures <- testConsoleBlackBox
+    childAgentFailures <- testChildAgentDriver
     let failures =
-            checks
+            consoleFailures
+            ++ childAgentFailures
+            ++ checks
                 [ testLayoutComposition
                 , testLayoutReferences
                 , testSampleLayout
@@ -73,6 +96,7 @@ main = do
                 , testNpcTurns
                 , testReconcileMSFs
                 , testNpcPatrolBehaviour
+                , testExternalNpcDecisions
                 , testFightMode
                 , testWetStatus
                 , testWetStatusState
@@ -87,6 +111,7 @@ main = do
                 , testEncounterMessages
                 , testGameView
                 , testInput
+                , testConsoleProtocol
                 , testAttackConfirmation
                 , testItemInteractionUI
                 , testWielding
@@ -442,6 +467,50 @@ testNpcPatrolBehaviour = checks
                 [(_, current)] ->
                     (npcPosition current, npcBehaviourState current)
                 _ -> error "patrol test expected exactly one NPC"
+
+testExternalNpcDecisions :: Test
+testExternalNpcDecisions = checks
+    [ expectEqual
+        "external decisions replace and pause one NPC behaviour"
+        [ ((1, 2), PatrollingToward UpperBound)
+        , ((2, 2), PatrollingToward UpperBound)
+        , ((2, 2), PatrollingToward UpperBound)
+        ]
+        (map (npcSnapshot controlledId) populations)
+    , expectEqual
+        "uncontrolled NPC behaviour continues beside external decisions"
+        [(5, 4), (4, 4), (3, 4)]
+        (map (npcPosition . (Map.! otherId)) populations)
+    ]
+    where
+        controlledId = NpcId 1
+        otherId = NpcId 2
+        controlled =
+            initNpc
+                (1, 1)
+                Adder
+                (patrol Horizontal (1, 4))
+                emptyItemStack
+        other =
+            initNpc
+                (4, 4)
+                Rat
+                (patrol Horizontal (3, 5))
+                emptyItemStack
+        initial = Map.fromList
+            [(controlledId, controlled), (otherId, other)]
+        populations =
+            runIdentity
+                $ embed
+                    (npcsStateWithDecisions testDungeon initial)
+                    [ ((2, 3), Nothing, Map.singleton controlledId (0, 1))
+                    , ((2, 3), Nothing, Map.empty)
+                    , ((2, 3), Nothing, Map.singleton controlledId (0, 1))
+                    ]
+
+        npcSnapshot ident population =
+            let npc = population Map.! ident
+            in (npcPosition npc, npcBehaviourState npc)
 
 testFightMode :: Test
 testFightMode = checks
@@ -1146,6 +1215,99 @@ testInput =
         ]
         (map parseInput "hjkl. \nqpdLiz")
 
+testConsoleProtocol :: Test
+testConsoleProtocol = checks
+    [ expectEqual
+        "console parsing trims lines and keeps commands case-sensitive"
+        [ ConsoleMove West
+        , ConsoleMove South
+        , ConsoleMove North
+        , ConsoleMove East
+        , ConsoleWait
+        , ConsoleSense
+        , ConsoleCharacter
+        , ConsoleQuit
+        , ConsoleInvalid
+        , ConsoleInvalid
+        ]
+        (map parseConsoleCommand
+            [" h ", "j", "k", "l", ".", "s", "c", "q", "", "L"])
+    , expectEqual
+        "console turns become keyed NPC decisions paired with player Wait"
+        [ Just (Wait, Map.singleton controlledId (1, 0))
+        , Just (Wait, Map.singleton controlledId (0, 0))
+        ]
+        [ consoleGameInput controlledId view (ConsoleMove East)
+        , consoleGameInput controlledId view ConsoleWait
+        ]
+    , expectEqual
+        "sensing reports a fixed square with oriented occupancy and terrain"
+        (Just (11, replicate 11 11, '.', '@', 'r', '#', '_'))
+        sensorSnapshot
+    , expectEqual
+        "protocol blocks separate readiness, character data, errors, and quit"
+        [ ["ready version=1 kind=adder radius=5"]
+        , ["ok turn=7"]
+        , ["ok turn=7"]
+        , [ "character kind=adder"
+          , "vitals hp=10 mp=0 hunger=0"
+          , "stats str=10 int=10 dex=10 con=10"
+          ]
+        , ["error unknown-command"]
+        , ["bye"]
+        ]
+        [ readyLines controlled
+        , responseLines controlledId (ConsoleMove East) view
+        , responseLines controlledId ConsoleWait view
+        , responseLines controlledId ConsoleCharacter view
+        , responseLines controlledId ConsoleInvalid view
+        , responseLines controlledId ConsoleQuit view
+        ]
+    , expectEqual
+        "an unavailable actor neither moves nor senses"
+        (Nothing, Nothing, ["error actor-unavailable"])
+        ( consoleGameInput missingId view (ConsoleMove East)
+        , senseLines missingId view
+        , responseLines missingId ConsoleSense view
+        )
+    , expectEqual
+        "child turn results distinguish admitted and held samples"
+        [["ok turn=8"], ["held turn=7"]]
+        [ turnResultLines view (view { vTurnNumber = 8 })
+        , turnResultLines view view
+        ]
+    ]
+    where
+        controlledId = NpcId 3
+        missingId = NpcId 99
+        controlled = initNpc (2, 2) Adder Stationary emptyItemStack
+        neighbor = initNpc (3, 2) Rat Stationary emptyItemStack
+        dungeon = testDungeon // [((2, 3), '#'), ((1, 2), ' ')]
+        state =
+            ( setFloor
+                (Map.singleton (1, 2) (testStack 1 [ringItem]))
+            $ setNpcs
+                (Map.fromList
+                    [ (controlledId, controlled)
+                    , (NpcId 4, neighbor)
+                    ])
+            $ emptyGameState (2, 1) dungeon
+            ) { stTurnNumber = 7 }
+        view = toGameView [] state
+        sensorSnapshot = do
+            header : rows <- senseLines controlledId view
+            if header /= "area pos=2,2"
+                then Nothing
+                else pure
+                    ( length rows
+                    , map length rows
+                    , rows !! 5 !! 5
+                    , rows !! 4 !! 5
+                    , rows !! 5 !! 6
+                    , rows !! 6 !! 5
+                    , rows !! 5 !! 4
+                    )
+
 testAttackConfirmation :: Test
 testAttackConfirmation = checks
     [ expectEqual
@@ -1818,6 +1980,222 @@ runScriptedGameWithMessages =
 
 boundsOf :: Dungeon -> (Position, Position)
 boundsOf = bounds
+
+testConsoleBlackBox :: IO Test
+testConsoleBlackBox = do
+    (status, output, errors) <-
+        readCreateProcessWithExitCode
+            (proc "dungeon-exe" ["--console"])
+            "s\nc\nk\nk\nh\nh\n.\ns\nx\nq\n"
+    (eofStatus, eofOutput, eofErrors) <-
+        readCreateProcessWithExitCode
+            (proc "dungeon-exe" ["--console"])
+            ""
+    (usageStatus, usageOutput, usageErrors) <-
+        readCreateProcessWithExitCode
+            (proc "dungeon-exe" ["--unknown"])
+            ""
+    (agentStatus, agentOutput, agentErrors) <-
+        readCreateProcessWithExitCode
+            (proc "dungeon-exe"
+                [ "--agent", "99", "--"
+                , "unused-child"
+                ])
+            ""
+    let blocks = responseBlocks output
+    pure $ checks
+        [ expectEqual
+            "the piped console transcript has deterministic blocks and timing"
+            ( Just
+                ( [ "ready version=1 kind=adder radius=5"
+                  , "area pos=8,8"
+                  , "character kind=adder"
+                  , "ok turn=1"
+                  , "ok turn=2"
+                  , "ok turn=3"
+                  , "ok turn=4"
+                  , "ok turn=5"
+                  , "area pos=7,6"
+                  , "error unknown-command"
+                  , "bye"
+                  ]
+                , [1, 12, 3, 1, 1, 1, 1, 1, 12, 1, 1]
+                , "_#.@......."
+                , "__#.@......"
+                )
+            )
+            (transcriptSnapshot blocks)
+        , expectEqual
+            "console mode exits successfully without stderr or ANSI output"
+            (ExitSuccess, "", False)
+            (status, errors, '\ESC' `elem` output)
+        , expectEqual
+            "EOF after readiness exits cleanly without a fabricated response"
+            ( ExitSuccess
+            , "ready version=1 kind=adder radius=5\n\n"
+            , ""
+            )
+            (eofStatus, eofOutput, eofErrors)
+        , expectEqual
+            "unknown command-line arguments fail with usage on stderr"
+            ( True
+            , ""
+            , "usage: dungeon-exe [--console | --agent NPC_ID -- PROGRAM [ARG ...]]\n"
+            )
+            (isFailure usageStatus, usageOutput, usageErrors)
+        , expectEqual
+            "agent mode rejects an unavailable identity before opening Vty"
+            (True, "", "agent: NPC 99 is unavailable\n")
+            (isFailure agentStatus, agentOutput, agentErrors)
+        ]
+    where
+        isFailure (ExitFailure _) = True
+        isFailure ExitSuccess = False
+
+        transcriptSnapshot blocks = do
+            initialArea <- blocksAt 1 blocks
+            finalArea <- blocksAt 8 blocks
+            initialPlayerRow <- blocksAt 4 initialArea
+            finalPlayerRow <- blocksAt 6 finalArea
+            pure
+                ( [first | first : _ <- blocks]
+                , map length blocks
+                , initialPlayerRow
+                , finalPlayerRow
+                )
+
+        blocksAt index values =
+            case drop index values of
+                value : _ -> Just value
+                [] -> Nothing
+
+responseBlocks :: String -> [[String]]
+responseBlocks = go . lines
+    where
+        go input =
+            case dropWhile null input of
+                [] -> []
+                nonEmpty ->
+                    let (block, rest) = break null nonEmpty
+                    in block : go rest
+
+testChildAgentDriver :: IO Test
+testChildAgentDriver = do
+    executable <- getExecutablePath
+    patrolResult <- timeout 5000000
+        $ withCreateProcess (patrolChild executable)
+        $ \toChild fromChild _ _ ->
+            case (toChild, fromChild) of
+                (Just input, Just output) -> runPatrol input output
+                _ -> pure ["patrol agent pipes were not created"]
+    fallbackResult <- timeout 5000000
+        $ withCreateProcess (quittingChild executable)
+        $ \toChild fromChild _ _ ->
+            case (toChild, fromChild) of
+                (Just input, Just output) -> runFallback input output
+                _ -> pure ["quitting agent pipes were not created"]
+    pure
+        $ maybe ["patrol agent dialogue timed out"] id patrolResult
+        ++ maybe ["quitting agent dialogue timed out"] id fallbackResult
+    where
+        patrolChild executable =
+            (proc executable ["--patrol-agent-fixture"])
+                { std_in = CreatePipe
+                , std_out = CreatePipe
+                , std_err = Inherit
+                }
+        quittingChild executable =
+            (proc executable ["--quitting-agent-fixture"])
+                { std_in = CreatePipe
+                , std_out = CreatePipe
+                , std_err = Inherit
+                }
+        ident = NpcId 3
+        npc = initNpc (1, 1) Adder Stationary emptyItemStack
+
+        viewAt x turn =
+            toGameView []
+                $ ( setNpcs
+                        (Map.singleton ident npc { npcPosition = (x, 1) })
+                    $ emptyGameState (5, 5) testDungeon
+                  ) { stTurnNumber = turn }
+
+        runPatrol input output = do
+            let view1 = viewAt 1 0
+                view2 = viewAt 2 1
+                view3 = viewAt 3 2
+            writeConsoleBlock input (readyLines npc)
+            (first, driver1) <-
+                unMSF (externalNpcDecisions ident output input) view1
+            writeConsoleBlock input (turnResultLines view1 view2)
+            (second, driver2) <- unMSF driver1 view2
+            writeConsoleBlock input (turnResultLines view2 view3)
+            (third, driver3) <- unMSF driver2 view3
+            writeConsoleBlock input (turnResultLines view3 view3)
+            (retried, _) <- unMSF driver3 view3
+            pure
+                $ expectEqual
+                    "the child fixture reverses at bounds and retries held turns"
+                    [ Map.singleton ident (1, 0)
+                    , Map.singleton ident (1, 0)
+                    , Map.singleton ident (-1, 0)
+                    , Map.singleton ident (-1, 0)
+                    ]
+                    [first, second, third, retried]
+
+        runFallback input output = do
+            let view = viewAt 1 0
+            (onQuit, fallback) <-
+                unMSF (externalNpcDecisions ident output input) view
+            (afterQuit, _) <- unMSF fallback view
+            pure
+                $ expectEqual
+                    "a quitting child permanently releases its NPC override"
+                    [Map.empty, Map.empty]
+                    [onQuit, afterQuit]
+
+patrolAgentFixture :: IO ()
+patrolAgentFixture = do
+    expectFixtureBlock "ready"
+    sendFixtureCommand "c"
+    expectFixtureBlock "character"
+    mapM_ takeTurn ["l", "l", "h", "h"]
+    where
+        takeTurn direction = do
+            sendFixtureCommand "s"
+            expectFixtureBlock "area"
+            sendFixtureCommand direction
+            expectFixtureBlock "turn result"
+
+quittingAgentFixture :: IO ()
+quittingAgentFixture = do
+    sendFixtureCommand "q"
+    expectFixtureBlock "bye"
+
+sendFixtureCommand :: String -> IO ()
+sendFixtureCommand command = do
+    putStrLn command
+    hFlush stdout
+
+expectFixtureBlock :: String -> IO ()
+expectFixtureBlock description = do
+    block <- readFixtureBlock
+    case block of
+        Just (_ : _) -> pure ()
+        _ -> error ("agent fixture expected " ++ description)
+
+readFixtureBlock :: IO (Maybe [String])
+readFixtureBlock = go []
+    where
+        go linesSoFar = do
+            eof <- hIsEOF stdin
+            if eof
+                then pure Nothing
+                else do
+                    line <- hGetLine stdin
+                    if null line
+                        then pure (Just $ reverse linesSoFar)
+                        else go (line : linesSoFar)
 
 checks :: [Test] -> Test
 checks = concat

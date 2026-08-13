@@ -28,6 +28,7 @@ module Dungeon.Logic
     , playerState
     , wieldedState
     , gameState
+    , gameStateWithNpcDecisions
     , toGameView
     ) where
 
@@ -298,11 +299,23 @@ gameState
        )
     => GameState
     -> MSF m Turn GameState
-gameState init = proc turn -> do
+gameState init =
+    arr (\turn -> (turn, Map.empty))
+        >>> gameStateWithNpcDecisions init
+
+gameStateWithNpcDecisions
+    :: ( MonadFix m
+       , MonadReader GameSettings m
+       , MonadWriter [String] m
+       , MonadState GameRuntimeState m
+       )
+    => GameState
+    -> MSF m (Turn, Map.Map NpcId NpcDecision) GameState
+gameStateWithNpcDecisions init = proc input -> do
     attempted <-
         runMaybeStateS
             (exceptToMaybeS $ gameStateAttempt init)
-            -< turn
+            -< input
     let tickEvt = TurnTick <$ attempted
     currentTurn <- turnNumber (stTurnNumber init) -< tickEvt
     state <- sampleAndHold init (arr id) -< attempted
@@ -324,8 +337,11 @@ gameStateAttempt
        , MonadState GameRuntimeState m
        )
     => GameState
-    -> MSF (ExceptT TurnHoldUp m) Turn GameState
-gameStateAttempt init = proc turn -> do
+    -> MSF
+         (ExceptT TurnHoldUp m)
+         (Turn, Map.Map NpcId NpcDecision)
+         GameState
+gameStateAttempt init = proc (turn, externalNpcDecisions) -> do
     rec
         pos <- iPre (plPos initPlayerState) -< pos'
         npcs <- iPre (stNpcs init) -< npcs'
@@ -359,9 +375,10 @@ gameStateAttempt init = proc turn -> do
             wieldedState (plWielded initPlayerState) -< (turn, inventory)
 
         npcs' <-
-            npcsState (stDungeon init) (stNpcs init)
+            npcsStateWithDecisions (stDungeon init) (stNpcs init)
                 -< ( pos'
                    , killedEvt
+                   , externalNpcDecisions
                    )
 
         fight <-

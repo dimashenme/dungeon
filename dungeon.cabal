@@ -10,6 +10,7 @@ maintainer:          dmitry.sustretov@gmail.com
 copyright:
 category:            Games
 build-type:          Simple
+extra-source-files:  scripts/patrol_agent.py
 
 library
   hs-source-dirs:      src
@@ -17,7 +18,8 @@ library
                        Dungeon.Logic, Dungeon.Item, Dungeon.Npc,
                        Dungeon.GameData, Dungeon.ItemState, Dungeon.Map,
                        Dungeon.Random, Dungeon.Types,
-                       Dungeon.TestLayout1, Dungeon.Combinators
+                       Dungeon.TestLayout1, Dungeon.Combinators,
+                       Dungeon.Console
   build-depends:       base >= 4.7 && < 5
                      , dunai
                      , mtl
@@ -27,6 +29,7 @@ library
                      , vty
                      , vty-crossplatform
                      , data-default
+                     , process
   default-language:    Haskell2010
   ghc-options:         -Wall -Wcompat
 
@@ -53,6 +56,8 @@ test-suite dungeon-test
                      , mtl
                      , containers
                      , transformers
+                     , process
+  build-tool-depends:  dungeon:dungeon-exe
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N -Wall -Wcompat
   default-language:    Haskell2010
 
